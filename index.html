@@ -115,6 +115,8 @@
   }
   .guardar:hover:not(:disabled) { background: var(--acento-osc); }
   .guardar:disabled { opacity: .55; cursor: default; }
+  .guardar.sec { background: #fff; color: var(--acento); border: 1px solid var(--acento); margin-top: 8px; }
+  .guardar.sec:hover:not(:disabled) { background: #f3f6f4; }
 
   /* Listas */
   .lista { background: var(--papel); border: 1px solid var(--linea); }
@@ -397,6 +399,37 @@
             </div>
           </div>
           <button class="guardar" id="btn-guardar-pen" type="submit">Guardar pendiente</button>
+        </form>
+      </details>
+    </section>
+
+    <section>
+      <details class="nuevo" id="det-avisos">
+        <summary>Avisos de vencimientos</summary>
+        <div class="nota" id="avisos-estado" style="margin-bottom:12px"></div>
+        <form id="form-avisos" autocomplete="off">
+          <div class="campos">
+            <div class="campo ancho check">
+              <input type="checkbox" id="av-email">
+              <label for="av-email">Mail con los vencimientos (a tu correo de Google)</label>
+            </div>
+            <div class="campo ancho check">
+              <input type="checkbox" id="av-cal">
+              <label for="av-cal">Agregar los vencimientos a Google Calendar, con aviso el día anterior a las 9:00</label>
+            </div>
+            <div class="campo">
+              <label for="av-dias">El mail muestra los próximos</label>
+              <select id="av-dias"><option value="3">3 días</option><option value="7">7 días</option><option value="14">14 días</option><option value="30">30 días</option></select>
+            </div>
+            <div class="campo">
+              <label for="av-hora">Se envía alrededor de las</label>
+              <select id="av-hora"><option value="6">6:00</option><option value="7">7:00</option><option value="8">8:00</option><option value="9">9:00</option></select>
+            </div>
+            <div class="campo ancho nota">El mail te escribe cuando hay algo vencido, que vence hoy o mañana, o un débito automático que puede no alcanzar, y los lunes con el resumen de la semana. El calendario usa uno propio, "Finanzas - vencimientos", con los próximos 45 días; las cuotas de tarjeta van como un solo evento por resumen.</div>
+          </div>
+          <button class="guardar" id="btn-av-guardar" type="submit">Guardar</button>
+          <button class="guardar sec" id="btn-av-probar" type="button">Guardar y enviar prueba</button>
+          <div class="nota" id="avisos-resultado" style="margin-top:10px"></div>
         </form>
       </details>
     </section>
@@ -688,7 +721,7 @@
     }
     let json;
     try { json = await resp.json(); }
-    catch (e) { throw new Error('El servidor respondió algo inesperado (' + resp.status + ')'); }
+    catch (e) { throw new Error('El servidor respondió algo inesperado. Si recién actualizaste el script, abrilo en Apps Script, ejecutá la función autorizarAvisos (aceptá los permisos) y publicá una nueva versión'); }
     if (!json.ok) {
       if (json.error === 'No autorizado') { pedirClave('La clave no coincide con la de Apps Script. Probá de nuevo.'); }
       throw new Error(json.error);
@@ -1314,6 +1347,61 @@
     prev.textContent = 'Se van a crear ' + fechas.length + ' pendientes, de "' + nom(fechas[0]) + '" a "' + nom(fechas[fechas.length - 1]) + '"' +
       (monto > 0 ? ', de ' + fmt(monto, mon) + ' cada uno' : '') + '. La fecha se agrega sola al nombre.';
     prev.hidden = false;
+  }
+
+  // ================= AVISOS =================
+  async function cargarAvisos() {
+    const caja = $('avisos-estado');
+    caja.textContent = 'Leyendo la configuración...';
+    try {
+      const e = await api('avisos_estado');
+      $('av-email').checked = !!e.email;
+      $('av-cal').checked = !!e.calendario;
+      $('av-dias').value = String(e.dias);
+      $('av-hora').value = String(e.hora);
+      if (!e.autorizado) {
+        caja.textContent = 'Falta autorizar los permisos. En Apps Script elegí la función autorizarAvisos, tocá Ejecutar y aceptá los permisos de mail y calendario.';
+      } else if (e.trigger) {
+        const que = [e.email ? 'mail a ' + (e.destino || 'tu correo') : '', e.calendario ? 'Google Calendar' : ''].filter(Boolean).join(' y ');
+        caja.textContent = 'Activo: ' + que + ', todos los días alrededor de las ' + e.hora + ':00.';
+      } else {
+        caja.textContent = 'Apagado. Tildá lo que quieras y guardá.';
+      }
+    } catch (err) {
+      caja.textContent = 'No se pudo leer la configuración: ' + err.message;
+    }
+  }
+
+  async function guardarAvisos(probar) {
+    const b1 = $('btn-av-guardar'), b2 = $('btn-av-probar');
+    const t1 = b1.textContent, t2 = b2.textContent;
+    b1.disabled = true; b2.disabled = true;
+    (probar ? b2 : b1).textContent = probar ? 'Enviando prueba...' : 'Guardando...';
+    $('avisos-resultado').textContent = '';
+    try {
+      await api('avisos_guardar', {
+        email: $('av-email').checked, calendario: $('av-cal').checked,
+        dias: Number($('av-dias').value), hora: Number($('av-hora').value),
+        url: location.protocol === 'https:' ? location.href.split('#')[0].split('?')[0] : ''
+      });
+      if (probar) {
+        const r = await api('avisos_probar');
+        const partes = [];
+        if (r.email) partes.push('Mail enviado a ' + r.email.destino + ' (' + r.email.items + ' vencimientos).');
+        if (r.calendario) partes.push('Calendario: ' + r.calendario.creados + ' nuevos, ' + r.calendario.actualizados + ' actualizados, ' + r.calendario.borrados + ' quitados.');
+        $('avisos-resultado').textContent = partes.join(' ');
+        toast('Prueba enviada');
+      } else {
+        toast('Avisos guardados');
+      }
+      await cargarAvisos();
+    } catch (err) {
+      toast('No se pudo: ' + err.message);
+      $('avisos-resultado').textContent = err.message;
+    } finally {
+      b1.textContent = t1; b2.textContent = t2;
+      b1.disabled = false; b2.disabled = false;
+    }
   }
 
   // ================= PROYECCIÓN Y RESUMEN =================
@@ -2932,6 +3020,9 @@
     cargar();
   });
   $('btn-refrescar').addEventListener('click', cargar);
+  $('det-avisos').addEventListener('toggle', function () { if (this.open) cargarAvisos(); });
+  $('form-avisos').addEventListener('submit', function (ev) { ev.preventDefault(); guardarAvisos(false); });
+  $('btn-av-probar').addEventListener('click', function () { guardarAvisos(true); });
   $('btn-clave').addEventListener('click', function () { pedirClave('Ingresá la nueva clave.'); });
   $('tab-res').addEventListener('click', function () { mostrar('res'); });
   ['sel-meses-res', 'sel-meses-proy'].forEach(function (id) {
