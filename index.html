@@ -115,6 +115,15 @@
   }
   .guardar:hover:not(:disabled) { background: var(--acento-osc); }
   .guardar:disabled { opacity: .55; cursor: default; }
+  .cola { background: #fff7e0; border-left: 4px solid var(--ambar); padding: 12px 16px; margin-bottom: 16px; }
+  .cola-cab { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; font-weight: 600; }
+  .cola-item { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 6px 0; border-top: 1px solid #ecd9a6; font-size: .9375rem; }
+  .cola-item:first-child { border-top: 0; }
+  .cola-acc { display: flex; gap: 12px; flex: none; }
+  body.sin-acceso #cola { display: none; }
+  .filtro-cuenta { display: flex; align-items: center; gap: 10px; margin: 0 0 10px; }
+  .filtro-cuenta label { font-size: .875rem; color: var(--suave); flex: none; }
+  .filtro-cuenta select { flex: 1; min-width: 0; padding: 8px; font-size: 16px; }
   .guardar.sec { background: #fff; color: var(--acento); border: 1px solid var(--acento); margin-top: 8px; }
   .guardar.sec:hover:not(:disabled) { background: #f3f6f4; }
 
@@ -228,13 +237,19 @@
 
   <div id="avisos"></div>
 
+  <div id="cola" class="cola" hidden>
+    <div class="cola-cab"><span id="cola-titulo"></span><button class="refrescar" id="btn-cola-enviar" type="button">Enviar ahora</button></div>
+    <div id="cola-lista"></div>
+  </div>
+
   <div id="acceso" hidden>
     <h2>Clave de acceso</h2>
     <p id="acceso-msg">Ingresá la clave que configuraste en Apps Script. Se guarda solo en este navegador.</p>
     <form id="form-acceso" style="padding:0;border:0" autocomplete="off">
       <div class="campo">
         <label for="clave">Clave</label>
-        <input type="password" id="clave" required autocomplete="off">
+        <input type="password" id="clave" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+        <div class="check" style="margin-top:8px"><input type="checkbox" id="clave-ver"><label for="clave-ver">Mostrar la clave</label></div>
       </div>
       <button class="guardar" type="submit">Entrar</button>
     </form>
@@ -313,12 +328,18 @@
 
     <section>
       <h2>Últimos movimientos</h2>
+      <div class="filtro-cuenta"><label for="fil-mov">Cuenta</label><select id="fil-mov"></select></div>
+      <div class="nota" id="fil-mov-info" hidden style="margin-bottom:10px"></div>
       <div class="lista" id="lista"></div>
+      <div style="margin-top:10px"><button class="refrescar" id="btn-mov-mas" type="button" hidden>Ver más</button></div>
+      <div class="nota" id="mov-nota" style="margin-top:8px" hidden></div>
     </section>
   </div>
 
   <!-- ============ PENDIENTES ============ -->
   <div id="vista-pen" role="tabpanel" hidden>
+    <div class="filtro-cuenta"><label for="fil-pen">Cuenta</label><select id="fil-pen"></select></div>
+    <div class="nota" id="fil-pen-info" hidden style="margin-bottom:12px"></div>
     <div id="resumen-pen" class="monedas"></div>
 
     <section>
@@ -698,6 +719,8 @@
   const estado = { cuentas: [], totales: {}, categorias: [], movimientos: [], pendientes: [], contrapartes: [], saldoPen: {}, cc: [], cuentasTodas: [], tarjetas: [], compras: [], presupuestos: [] };
   const abiertoCC = {};
   const HORIZONTE_DIAS = 30;
+  const MOV_PAGINA = 25;
+  let filtroMov = '', filtroPen = '', movVisibles = MOV_PAGINA;   // filtros por cuenta: se reinician al abrir la app
   // Meses que se proyectan (Resumen y Proyección). Se recuerda en este navegador.
   let mesesProyeccion = (function () {
     try { const v = Number(localStorage.getItem('finanzas_meses')); return [3, 6, 12, 18, 24].indexOf(v) >= 0 ? v : 6; } catch (e) { return 6; }
@@ -706,24 +729,41 @@
   const masAbiertoCC = {};        // ídem por contraparte
   const $ = (id) => document.getElementById(id);
 
-  async function api(action, data) {
-    let resp;
+  let TIMEOUT_LECTURA_MS = 30000, TIMEOUT_ESCRITURA_MS = 45000;
+  const LECTURAS = ['todo', 'listar', 'saldos', 'cuentas_corrientes', 'avisos_estado'];
+
+  async function api(action, data, opts) {
+    opts = opts || {};
+    const sinSenal = function () {
+      const sin = new Error('Sin conexión o señal muy débil');
+      sin.sinConexion = true;
+      return sin;
+    };
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) throw sinSenal();
+    const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const limite = LECTURAS.indexOf(action) >= 0 ? TIMEOUT_LECTURA_MS : TIMEOUT_ESCRITURA_MS;
+    const reloj = ctl ? setTimeout(function () { ctl.abort(); }, limite) : null;   // nunca queda esperando para siempre
+    let json;
     try {
-      resp = await fetch(API_URL, {
+      const resp = await fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },   // evita el preflight de CORS
-        body: JSON.stringify({ token: TOKEN, action: action, data: data || {} })
+        body: JSON.stringify({ token: TOKEN, action: action, data: data || {}, opId: opts.opId || undefined }),
+        signal: ctl ? ctl.signal : undefined
       });
+      json = await resp.json();
     } catch (e) {
-      const sin = new Error('Sin conexión: probá de nuevo cuando tengas señal');
-      sin.sinConexion = true;
-      throw sin;
+      if (e && e.name === 'SyntaxError') {
+        const raro = new Error('El servidor respondió algo inesperado. Suele ser un corte momentáneo de Google: tocá Actualizar. Si sigue igual, abrí Apps Script, ejecutá la función autorizarAvisos (aceptá los permisos) y publicá una nueva versión');
+        raro.respuestaRara = true;
+        throw raro;
+      }
+      throw sinSenal();
+    } finally {
+      if (reloj) clearTimeout(reloj);
     }
-    let json;
-    try { json = await resp.json(); }
-    catch (e) { throw new Error('El servidor respondió algo inesperado. Si recién actualizaste el script, abrilo en Apps Script, ejecutá la función autorizarAvisos (aceptá los permisos) y publicá una nueva versión'); }
     if (!json.ok) {
-      if (json.error === 'No autorizado') { pedirClave('La clave no coincide con la de Apps Script. Probá de nuevo.'); }
+      if (json.error === 'No autorizado') { pedirClave('La clave no coincide con la de Apps Script. Revisá mayúsculas, guiones y espacios. Es la que figura en Apps Script > Configuración del proyecto > Propiedades de la secuencia de comandos > TOKEN.'); }
       throw new Error(json.error);
     }
     return json.data;
@@ -787,7 +827,7 @@
     t.textContent = msg;
     t.classList.add('visible');
     clearTimeout(toast._t);
-    toast._t = setTimeout(function () { t.classList.remove('visible'); }, 3000);
+    toast._t = setTimeout(function () { t.classList.remove('visible'); }, msg.length > 70 ? 6000 : 3000);
   }
   function aviso(titulo, detalle) {
     const cont = $('avisos');
@@ -812,6 +852,7 @@
     $('acceso').hidden = false;
     if (mensaje) $('acceso-msg').textContent = mensaje;
     $('clave').value = '';
+    $('clave-ver').checked = false; $('clave').type = 'password';
     $('clave').focus();
   }
 
@@ -916,16 +957,74 @@
     });
   }
 
+  function textoCuentaOpcion(c) { return c.nombre + ' (' + c.moneda + ')' + (c.activa === 'NO' ? ' · archivada' : ''); }
+
+  // Llena un selector de cuentas (activas primero, archivadas al final) y conserva lo elegido.
+  // Si la cuenta elegida ya no existe, vuelve a "Todas".
+  function llenarFiltroCuentas(sel, valor, conSinCuenta) {
+    sel.innerHTML = '';
+    const todas = el('option', '', 'Todas las cuentas');
+    todas.value = '';
+    sel.appendChild(todas);
+    estado.cuentasTodas.slice().sort(function (a, b) {
+      const aa = a.activa !== 'NO', bb = b.activa !== 'NO';
+      if (aa !== bb) return aa ? -1 : 1;
+      return String(a.nombre).localeCompare(String(b.nombre));
+    }).forEach(function (c) {
+      const o = el('option', '', textoCuentaOpcion(c));
+      o.value = c.id;
+      sel.appendChild(o);
+    });
+    if (conSinCuenta) {
+      const s = el('option', '', 'Sin cuenta prevista');
+      s.value = '__sin__';
+      sel.appendChild(s);
+    }
+    const existe = Array.prototype.some.call(sel.options, function (o) { return o.value === valor; });
+    sel.value = existe ? valor : '';
+    return sel.value;
+  }
+
+  function renderFiltrosCuenta() {
+    filtroMov = llenarFiltroCuentas($('fil-mov'), filtroMov, false);
+    filtroPen = llenarFiltroCuentas($('fil-pen'), filtroPen, true);
+  }
+
+  // Si cargás algo en otra cuenta mientras filtrás, el mensaje aclara por qué no lo ves en la lista
+  function sufijoFiltro(a, b) {
+    if (!filtroMov || filtroMov === a || filtroMov === b) return '';
+    const c = estado.cuentasTodas.filter(function (x) { return x.id === filtroMov; })[0];
+    return ' · no aparece en la lista porque estás viendo ' + (c ? c.nombre : 'otra cuenta');
+  }
+
   function renderMovimientos() {
     const cont = $('lista');
     cont.innerHTML = '';
-    const movs = estado.movimientos.slice().sort(function (a, b) {
+    const todos = estado.movimientos.slice().sort(function (a, b) {
       if (a.fecha !== b.fecha) return a.fecha < b.fecha ? 1 : -1;
       return b._fila - a._fila;
-    }).slice(0, 25);
+    });
+    const lista = filtroMov ? todos.filter(function (m) { return m.cuenta === filtroMov; }) : todos;
+    const visibles = lista.slice(0, movVisibles);
 
-    if (!movs.length) {
-      cont.appendChild(el('div', 'vacio', 'Todavía no cargaste movimientos. Usá el formulario de arriba para el primero.'));
+    const info = $('fil-mov-info');
+    if (filtroMov) {
+      const c = estado.cuentasTodas.filter(function (x) { return x.id === filtroMov; })[0];
+      const viva = estado.cuentas.filter(function (x) { return x.id === filtroMov; })[0];
+      info.textContent = (c ? c.nombre : 'Cuenta') + (viva ? ' · saldo actual ' + fmt(viva.saldo, viva.moneda) : ' · cuenta archivada') +
+        ' · ' + lista.length + (lista.length === 1 ? ' movimiento reciente' : ' movimientos recientes');
+      info.hidden = false;
+    } else {
+      info.hidden = true;
+    }
+    const mas = $('btn-mov-mas'), nota = $('mov-nota');
+    mas.hidden = lista.length <= movVisibles;
+    mas.textContent = 'Ver ' + Math.min(MOV_PAGINA, Math.max(0, lista.length - movVisibles)) + ' más';
+    nota.hidden = !(lista.length && lista.length <= movVisibles);
+    nota.textContent = 'Se muestran los movimientos recientes; el historial completo está en la planilla.';
+
+    if (!visibles.length) {
+      cont.appendChild(el('div', 'vacio', filtroMov ? 'No hay movimientos recientes en esta cuenta.' : 'Todavía no cargaste movimientos. Usá el formulario de arriba para el primero.'));
       return;
     }
     const nombreCuenta = {}, nombreCat = {}, porId = {};
@@ -933,7 +1032,7 @@
     estado.categorias.forEach(function (c) { nombreCat[c.id] = c.nombre; });
     estado.movimientos.forEach(function (m) { porId[m.id] = m; });
 
-    movs.forEach(function (m) {
+    visibles.forEach(function (m) {
       const transf = m.tipo === 'transf_salida' || m.tipo === 'transf_entrada';
       const entra = m.tipo === 'ingreso' || m.tipo === 'transf_entrada';
       const pagoTar = m.tipo === 'pago_tarjeta';
@@ -971,20 +1070,52 @@
   }
   function esEstimado(p) { return p.estimado === 'SI'; }
 
+  // Filtro de la pestaña Pendientes: se filtra por la cuenta prevista de pago. Los resúmenes de tarjeta no tienen.
+  function pasaFiltroPen(x) {
+    if (!filtroPen) return true;
+    const cta = x.esResumen ? '' : (x.cuenta_prevista || '');
+    return filtroPen === '__sin__' ? !cta : cta === filtroPen;
+  }
+
+  function renderInfoFiltroPen() {
+    const info = $('fil-pen-info');
+    if (!filtroPen) { info.hidden = true; return; }
+    if (filtroPen === '__sin__') {
+      info.textContent = 'Mostrando los pendientes sin cuenta prevista, incluidos los resúmenes de tarjeta.';
+    } else {
+      const c = estado.cuentasTodas.filter(function (x) { return x.id === filtroPen; })[0];
+      const viva = estado.cuentas.filter(function (x) { return x.id === filtroPen; })[0];
+      info.textContent = 'Mostrando solo los pendientes con cuenta prevista ' + (c ? c.nombre : 'esa cuenta') +
+        (viva ? ' (saldo actual ' + fmt(viva.saldo, viva.moneda) + ')' : ' (archivada)') +
+        '. Los resúmenes de tarjeta no tienen cuenta prevista: están en "Sin cuenta prevista".';
+    }
+    info.hidden = false;
+  }
+
   function renderResumenPen() {
     const cont = $('resumen-pen');
     cont.innerHTML = '';
-    const lista = abiertos();
+    renderInfoFiltroPen();
+    // El aviso de vencidos de la pestaña cuenta todo, sin importar el filtro
+    const vencidosGlobal = {};
+    let nVencidosGlobal = 0;
+    abiertos().forEach(function (p) {
+      if (p.vencimiento && diasHasta(p.vencimiento) < 0) {
+        const kv = claveVenc(p);
+        if (!vencidosGlobal[kv]) { vencidosGlobal[kv] = true; nVencidosGlobal++; }
+      }
+    });
+    $('badge-venc').textContent = nVencidosGlobal ? '(' + nVencidosGlobal + ' vencidos)' : '';
+
+    const lista = abiertos().filter(function (p) { return pasaFiltroPen(p); });
     if (!lista.length) {
       cont.classList.remove('dos');
-      const v = el('div', 'vacio', 'No hay pendientes abiertos.');
+      const v = el('div', 'vacio', filtroPen ? 'No hay pendientes abiertos con este filtro.' : 'No hay pendientes abiertos.');
       v.style.background = '#fff';
       cont.appendChild(v);
-      $('badge-venc').textContent = '';
       return;
     }
     const acum = {};
-    let totalVencidos = 0;
     const vk = {};
     lista.forEach(function (p) {
       const m = p.moneda;
@@ -996,7 +1127,7 @@
       } else {
         if (cobra) acum[m].despCobrar += s; else acum[m].despPagar += s;
       }
-      if (p.vencimiento && diasHasta(p.vencimiento) < 0) { acum[m].vencido += s; const kv = claveVenc(p); if (!vk[kv]) { vk[kv] = true; acum[m].nVenc++; totalVencidos++; } }
+      if (p.vencimiento && diasHasta(p.vencimiento) < 0) { acum[m].vencido += s; const kv = claveVenc(p); if (!vk[kv]) { vk[kv] = true; acum[m].nVenc++; } }
     });
     const monedas = ordenMonedas(Object.keys(acum));
     cont.classList.toggle('dos', monedas.length > 1);
@@ -1029,15 +1160,14 @@
       }
       cont.appendChild(bloque);
     });
-    $('badge-venc').textContent = totalVencidos ? '(' + totalVencidos + ' vencidos)' : '';
   }
 
   function renderListaPen() {
     const cont = $('lista-pen');
     cont.innerHTML = '';
-    const lista = itemsLista().sort(porVencimiento);
+    const lista = itemsLista(true).sort(porVencimiento);
     if (!lista.length) {
-      cont.appendChild(el('div', 'vacio', 'Todo al día. Cargá un pendiente cuando tengas una cuota, un alquiler o algo que cobrar.'));
+      cont.appendChild(el('div', 'vacio', filtroPen ? 'No hay pendientes abiertos con este filtro.' : 'Todo al día. Cargá un pendiente cuando tengas una cuota, un alquiler o algo que cobrar.'));
       return;
     }
     const nombreCp = {};
@@ -1186,9 +1316,9 @@
       if (monto > saldo + 0.001) { toast('El monto supera el saldo pendiente (' + fmt(saldo, p.moneda) + ')'); return; }
       ok.disabled = true; ok.textContent = 'Guardando...';
       try {
-        await api('pagar', { pendiente: p.id, cuenta: sCuenta.value, fecha: fFecha.input.value, monto: monto });
-        toast(cobra ? 'Cobro registrado' : 'Pago registrado');
-        await cargar();
+        const r = await guardarOp('pagar', { pendiente: p.id, cuenta: sCuenta.value, fecha: fFecha.input.value, monto: monto });
+        if (r.encolado) { toast(msgEncolado(r)); caja.remove(); }
+        else { toast(cobra ? 'Cobro registrado' : 'Pago registrado'); await cargar(); }
       } catch (err) {
         toast('No se registró: ' + err.message);
         ok.disabled = false; ok.textContent = cobra ? 'Confirmar cobro' : 'Confirmar pago';
@@ -1846,22 +1976,26 @@
   function leerCopiaLocal() {
     try { const c = JSON.parse(localStorage.getItem('finanzas_copia') || 'null'); return c && c.r ? c : null; } catch (e) { return null; }
   }
+  function comoLista(x) { return Array.isArray(x) ? x : []; }
+
   function aplicarDatos(r) {
     estado.cuentas = r[0].cuentas;
     estado.totales = r[0].totales;
-    estado.categorias = r[1];
-    estado.movimientos = r[2];
-    estado.pendientes = r[3];
-    estado.contrapartes = r[4];
-    estado.cc = r[5];
-    estado.cuentasTodas = r[6];
-    estado.tarjetas = r[7];
-    estado.compras = r[8];
-    estado.presupuestos = r[9];
+    // si alguna lista llega vacía o ausente, el resto de la pantalla se arma igual
+    estado.categorias = comoLista(r[1]);
+    estado.movimientos = comoLista(r[2]);
+    estado.pendientes = comoLista(r[3]);
+    estado.contrapartes = comoLista(r[4]);
+    estado.cc = comoLista(r[5]);
+    estado.cuentasTodas = comoLista(r[6]);
+    estado.tarjetas = comoLista(r[7]);
+    estado.compras = comoLista(r[8]);
+    estado.presupuestos = comoLista(r[9]);
     estado.saldoPen = {};
     r[0].pendientes.forEach(function (p) { estado.saldoPen[p.id] = p.saldo; });
     renderSaldos(r[0]);
     renderCuentas();
+    renderFiltrosCuenta();
     renderMovimientos();
     renderContrapartes();
     renderResumenPen();
@@ -1876,33 +2010,196 @@
     renderPresupuestos();
   }
 
-  async function cargar() {
+  // ---- Cargas guardadas en el celular cuando no hay señal ----
+  const MSG_ENCOLADO = 'Sin señal: quedó guardado en el celular y se envía solo cuando vuelva';
+  let enviandoCola = false;
+
+  function leerCola() { try { return JSON.parse(localStorage.getItem('finanzas_cola') || '[]'); } catch (e) { return []; } }
+  function guardarCola(c) {
+    try { localStorage.setItem('finanzas_cola', JSON.stringify(c)); return true; } catch (e) { return false; }
+  }
+  function quitarDeCola(op) { guardarCola(leerCola().filter(function (x) { return x.op !== op; })); }
+  function marcarErrorCola(op, msg) {
+    const c = leerCola();
+    const it = c.filter(function (x) { return x.op === op; })[0];
+    if (it) { it.error = msg; guardarCola(c); }
+  }
+  function nuevoOp() {
+    try { if (window.crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (e) { /* se usa el respaldo */ }
+    return 'op-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12);
+  }
+  function etiquetaOp(action, d) {
+    if (action === 'crear') {
+      const c = cuentaPorId(d.registro.cuenta);
+      return (d.registro.tipo === 'gasto' ? 'Gasto ' : 'Ingreso ') + fmt(d.registro.monto, c ? c.moneda : 'ARS') + (d.registro.descripcion ? ' · ' + d.registro.descripcion : '');
+    }
+    if (action === 'transferir') { const c = cuentaPorId(d.origen); return 'Transferencia ' + fmt(d.monto_origen, c ? c.moneda : 'ARS') + (d.descripcion ? ' · ' + d.descripcion : ''); }
+    if (action === 'comprar_tarjeta') return 'Compra con tarjeta · ' + d.descripcion + ' ' + fmt(d.monto, d.moneda);
+    if (action === 'pagar') {
+      const p = estado.pendientes.filter(function (x) { return x.id === d.pendiente; })[0];
+      const c = cuentaPorId(d.cuenta);
+      return 'Pago · ' + (p ? p.descripcion : 'pendiente') + ' ' + fmt(d.monto, c ? c.moneda : 'ARS');
+    }
+    if (action === 'pagar_resumen') return 'Pago de resumen ' + fmt(d.monto, d.moneda);
+    return action;
+  }
+
+  // Guarda una carga. Sin señal (o con señal tan débil que se corta), queda en el celular y se reenvía sola.
+  // El identificador evita que se duplique si el servidor ya la había recibido.
+  async function guardarOp(action, data) {
+    const op = nuevoOp();
+    try {
+      return await api(action, data, { opId: op });
+    } catch (err) {
+      if (!err.sinConexion && !err.respuestaRara) throw err;
+      const c = leerCola();
+      c.push({ op: op, action: action, data: data, etiqueta: etiquetaOp(action, data), t: Date.now() });
+      if (!guardarCola(c)) throw new Error('Sin señal y no hay espacio para guardarlo en el celular');
+      renderCola();
+      return { encolado: true, motivo: err.sinConexion ? 'senal' : 'servidor' };
+    }
+  }
+
+  function msgEncolado(r) {
+    return r.motivo === 'servidor' ? 'El servidor no respondió bien: quedó guardado en el celular y se reintenta solo' : MSG_ENCOLADO;
+  }
+
+  async function enviarCola(manual) {
+    if (enviandoCola) return { enviados: 0, fallidos: 0 };
+    enviandoCola = true;
+    let enviados = 0, fallidos = 0;
+    try {
+      const pendientes = leerCola().filter(function (x) { return manual || !x.error; });
+      for (let k = 0; k < pendientes.length; k++) {
+        const item = pendientes[k];
+        try {
+          await api(item.action, item.data, { opId: item.op });
+          quitarDeCola(item.op);
+          enviados++;
+        } catch (err) {
+          if (err.sinConexion || err.respuestaRara || err.message === 'No autorizado') break;   // se reintenta cuando haya señal o clave
+          marcarErrorCola(item.op, err.message);
+          fallidos++;
+        }
+      }
+    } finally {
+      enviandoCola = false;
+      renderCola();
+    }
+    return { enviados: enviados, fallidos: fallidos };
+  }
+
+  function renderCola() {
+    const c = leerCola();
+    const cont = $('cola');
+    cont.hidden = !c.length;
+    if (!c.length) return;
+    const esperando = c.filter(function (x) { return !x.error; }).length, conError = c.length - esperando;
+    const partes = [];
+    if (esperando) partes.push(esperando + (esperando === 1 ? ' carga guardada en este celular, esperando señal' : ' cargas guardadas en este celular, esperando señal'));
+    if (conError) partes.push(conError + (conError === 1 ? ' con error' : ' con error'));
+    $('cola-titulo').textContent = partes.join(' · ');
+    const lista = $('cola-lista');
+    lista.innerHTML = '';
+    c.forEach(function (x) {
+      const f = el('div', 'cola-item');
+      const txt = el('span', '', x.etiqueta || x.action);
+      if (x.error) { txt.appendChild(el('span', 'neg', ' · ' + x.error)); }
+      f.appendChild(txt);
+      const acc = el('span', 'cola-acc');
+      if (x.error) {
+        const r = el('button', 'anular', 'Reintentar');
+        r.type = 'button';
+        r.addEventListener('click', function () {
+          const cc = leerCola(); const it = cc.filter(function (y) { return y.op === x.op; })[0];
+          if (it) { delete it.error; guardarCola(cc); }
+          reintentoManual = true; cargar();
+        });
+        acc.appendChild(r);
+      }
+      const d = el('button', 'anular', 'Descartar');
+      d.type = 'button';
+      d.addEventListener('click', function () {
+        if (!confirm('¿Descartar "' + (x.etiqueta || x.action) + '"? No se va a enviar.')) return;
+        quitarDeCola(x.op); renderCola();
+      });
+      acc.appendChild(d);
+      f.appendChild(acc);
+      lista.appendChild(f);
+    });
+  }
+
+  // Google a veces devuelve una página de error pasajera en vez de la respuesta: al reintentar casi siempre anda
+  async function apiConReintento(action, data) {
+    try { return await api(action, data); }
+    catch (err) {
+      if (!err.respuestaRara) throw err;
+      await new Promise(function (r) { setTimeout(r, 1500); });
+      return api(action, data);
+    }
+  }
+
+  // Pide todo en UNA consulta (mucho más liviano con señal débil). Con un script viejo, usa las consultas de antes.
+  async function traerTodo() {
+    let r = null;
+    try { r = await apiConReintento('todo'); }
+    catch (err) { if (!/Acción desconocida/.test(err.message)) throw err; }
+    if (Array.isArray(r) && r.length === 10) return r;
+    return Promise.all([
+      api('saldos'),
+      api('listar', { hoja: 'categorias' }),
+      api('listar', { hoja: 'movimientos' }),
+      api('listar', { hoja: 'pendientes' }),
+      api('listar', { hoja: 'contrapartes' }),
+      api('cuentas_corrientes'),
+      api('listar', { hoja: 'cuentas' }),
+      api('listar', { hoja: 'tarjetas' }),
+      api('listar', { hoja: 'compras' }),
+      api('listar', { hoja: 'presupuestos' })
+    ]);
+  }
+
+  let primeraCarga = true, cargando = null, recargar = false, reintentoManual = false;
+
+  function cargar() {
+    if (cargando) { recargar = true; return cargando; }       // si ya hay una en curso, se repite apenas termine
+    cargando = cargarAhora().finally(function () {
+      cargando = null;
+      if (recargar) { recargar = false; cargar(); }
+    });
+    return cargando;
+  }
+
+  async function cargarAhora() {
     if (!TOKEN) { pedirClave(); return; }
     document.body.classList.remove('sin-acceso');
     $('acceso').hidden = true;
+    // Arranque instantáneo: se muestra lo último que se vio mientras llegan los datos nuevos
+    if (primeraCarga) {
+      primeraCarga = false;
+      const copia = leerCopiaLocal();
+      if (copia && Array.isArray(copia.r) && copia.r.length === 10) { try { aplicarDatos(copia.r); } catch (e) { /* copia de una versión vieja: se ignora */ } }
+    }
+    const btnAct = $('btn-refrescar');
+    btnAct.textContent = 'Actualizando...';
+    renderCola();
     try {
-      const r = await Promise.all([
-        api('saldos'),
-        api('listar', { hoja: 'categorias' }),
-        api('listar', { hoja: 'movimientos' }),
-        api('listar', { hoja: 'pendientes' }),
-        api('listar', { hoja: 'contrapartes' }),
-        api('cuentas_corrientes'),
-        api('listar', { hoja: 'cuentas' }),
-        api('listar', { hoja: 'tarjetas' }),
-        api('listar', { hoja: 'compras' }),
-        api('listar', { hoja: 'presupuestos' })
-      ]);
+      let envio = { enviados: 0, fallidos: 0 };
+      try { envio = await enviarCola(reintentoManual); } catch (e) { /* se sigue con la carga */ }
+      reintentoManual = false;
+      const r = await traerTodo();
       aplicarDatos(r);
       guardarCopiaLocal(r);
       aviso();
+      if (envio.enviados) toast(envio.enviados === 1 ? 'Se envió 1 carga que estaba guardada en el celular' : 'Se enviaron ' + envio.enviados + ' cargas que estaban guardadas en el celular');
+      if (envio.fallidos) toast(envio.fallidos + (envio.fallidos === 1 ? ' carga dio error: revisala arriba' : ' cargas dieron error: revisalas arriba'));
     } catch (err) {
       if (err.sinConexion) {
         const copia = leerCopiaLocal();
         if (copia) {
           aplicarDatos(copia.r);
           aviso('Sin conexión', 'Estás viendo los datos guardados el ' + new Date(copia.t).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) +
-            '. Para cargar o pagar algo necesitás señal; cuando vuelva, tocá Actualizar.');
+            '. Los gastos, transferencias, compras con tarjeta y pagos que cargues quedan guardados en el celular y se envían solos cuando vuelva la señal.');
         } else {
           aviso('Sin conexión', 'Todavía no hay datos guardados en este dispositivo. Conectate y tocá Actualizar.');
         }
@@ -1911,6 +2208,9 @@
       } else if (err.message !== 'No autorizado') {
         aviso('No se pudo cargar la información', err.message + '. Revisá tu conexión y que la implementación esté activa (si cambiaste el script, publicá una nueva versión).');
       }
+    } finally {
+      btnAct.textContent = 'Actualizar';
+      renderCola();
     }
   }
 
@@ -1923,24 +2223,27 @@
     const textoBtn = btn.textContent;
     btn.disabled = true; btn.textContent = 'Guardando...';
     try {
+      let encolado = false;
       if (tipo === 'transf') {
         const origen = $('cuenta').value, destino = $('cuenta-destino').value;
         if (origen === destino) throw new Error('Elegí dos cuentas distintas');
         const distintas = monedasDistintas();
         const montoDest = distintas ? parseMonto($('monto-dest').value) : monto;
         if (!(montoDest > 0)) throw new Error('Ingresá el monto que entra');
-        const r = await api('transferir', { origen: origen, destino: destino, monto_origen: monto,
+        const r = await guardarOp('transferir', { origen: origen, destino: destino, monto_origen: monto,
           monto_destino: montoDest, fecha: $('fecha').value, descripcion: $('descripcion').value.trim() });
-        toast(distintas && r.tc ? 'Transferencia guardada (TC ' + fmt(r.tc, 'ARS') + ')' : 'Transferencia guardada');
+        encolado = !!r.encolado;
+        toast(encolado ? msgEncolado(r) : ((distintas && r.tc ? 'Transferencia guardada (TC ' + fmt(r.tc, 'ARS') + ')' : 'Transferencia guardada') + sufijoFiltro(origen, destino)));
         $('monto-dest').value = '';
       } else {
-        await api('crear', { hoja: 'movimientos', registro: {
+        const r = await guardarOp('crear', { hoja: 'movimientos', registro: {
           fecha: $('fecha').value, tipo: tipo, monto: monto, cuenta: $('cuenta').value,
           categoria: $('categoria').value, descripcion: $('descripcion').value.trim() } });
-        toast('Movimiento guardado');
+        encolado = !!r.encolado;
+        toast(encolado ? msgEncolado(r) : 'Movimiento guardado' + sufijoFiltro($('cuenta').value));
       }
       $('monto').value = ''; $('descripcion').value = '';
-      await cargar();
+      if (!encolado) await cargar();
       $('monto').focus();
     } catch (err) {
       toast('No se guardó: ' + err.message);
@@ -2501,7 +2804,10 @@
     return Object.keys(mapa).map(function (k) { return mapa[k]; });
   }
   // Lo que se muestra en las listas: pendientes sueltos + un renglón por resumen de tarjeta
-  function itemsLista() { return abiertos().filter(function (p) { return !p.tarjeta; }).concat(gruposTarjeta()); }
+  function itemsLista(filtrar) {
+    const todos = abiertos().filter(function (p) { return !p.tarjeta; }).concat(gruposTarjeta());
+    return filtrar ? todos.filter(pasaFiltroPen) : todos;
+  }
   function tituloItem(p, nombreCp) {
     return p.esResumen ? 'Resumen ' + nombreTarjeta(p.tarjeta) + (p.moneda === 'USD' ? ' (USD)' : '') : (p.descripcion || nombreCp[p.contraparte] || 'Pendiente');
   }
@@ -2606,10 +2912,10 @@
       if (monto > g.total + 0.001) { toast('El monto supera el total del resumen (' + fmt(g.total, g.moneda) + ')'); return; }
       ok.disabled = true; ok.textContent = 'Guardando...';
       try {
-        await api('pagar_resumen', { tarjeta: g.tarjeta, moneda: g.moneda, vencimiento: g.vencimiento,
+        const r = await guardarOp('pagar_resumen', { tarjeta: g.tarjeta, moneda: g.moneda, vencimiento: g.vencimiento,
           cuenta: sCuenta.value, fecha: fFecha.input.value, monto: monto });
-        toast('Pago del resumen registrado');
-        await cargar();
+        if (r.encolado) { toast(msgEncolado(r)); caja.remove(); }
+        else { toast('Pago del resumen registrado'); await cargar(); }
       } catch (err) {
         toast('No se registró: ' + err.message);
         ok.disabled = false; ok.textContent = 'Confirmar pago';
@@ -2854,15 +3160,15 @@
     const btn = $('btn-guardar-compra');
     btn.disabled = true; btn.textContent = 'Guardando...';
     try {
-      await api('comprar_tarjeta', {
+      const r = await guardarOp('comprar_tarjeta', {
         tarjeta: $('k-tar').value, fecha: $('k-fecha').value, descripcion: $('k-desc').value.trim(),
         monto: monto, moneda: $('k-mon').value, cuotas: cuotas, monto_cuota: valorCuota,
         categoria: $('k-cat').value, primer_mes: $('k-res').value
       });
       $('k-desc').value = ''; $('k-monto').value = ''; $('k-vcuota').value = '';
       $('k-cuotas').value = '1';
-      toast(cuotas > 1 ? 'Compra guardada en ' + cuotas + ' cuotas' : 'Compra guardada');
-      await cargar();
+      if (r.encolado) { toast(msgEncolado(r)); }
+      else { toast(cuotas > 1 ? 'Compra guardada en ' + cuotas + ' cuotas' : 'Compra guardada'); await cargar(); }
       $('k-desc').focus();
     } catch (err) {
       toast('No se guardó: ' + err.message);
@@ -3019,10 +3325,24 @@
     guardarClave(v);
     cargar();
   });
-  $('btn-refrescar').addEventListener('click', cargar);
+  $('btn-refrescar').addEventListener('click', function () { reintentoManual = true; cargar(); });
+  $('fil-mov').addEventListener('change', function () {
+    filtroMov = this.value; movVisibles = MOV_PAGINA; renderMovimientos();
+    // al mirar una cuenta, el formulario de carga arranca en esa misma cuenta
+    if (filtroMov && cuentaPorId(filtroMov)) { $('cuenta').value = filtroMov; actualizarFormMov(); }
+  });
+  $('btn-mov-mas').addEventListener('click', function () { movVisibles += MOV_PAGINA; renderMovimientos(); });
+  $('fil-pen').addEventListener('change', function () { filtroPen = this.value; renderResumenPen(); renderListaPen(); });
+  $('btn-cola-enviar').addEventListener('click', function () { reintentoManual = true; cargar(); });
+  window.addEventListener('online', function () { cargar(); });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden && leerCola().length) cargar(); });
+  setInterval(function () {
+    if (leerCola().length && !document.hidden && navigator.onLine !== false) cargar();
+  }, 60000);
   $('det-avisos').addEventListener('toggle', function () { if (this.open) cargarAvisos(); });
   $('form-avisos').addEventListener('submit', function (ev) { ev.preventDefault(); guardarAvisos(false); });
   $('btn-av-probar').addEventListener('click', function () { guardarAvisos(true); });
+  $('clave-ver').addEventListener('change', function () { $('clave').type = this.checked ? 'text' : 'password'; });
   $('btn-clave').addEventListener('click', function () { pedirClave('Ingresá la nueva clave.'); });
   $('tab-res').addEventListener('click', function () { mostrar('res'); });
   ['sel-meses-res', 'sel-meses-proy'].forEach(function (id) {
