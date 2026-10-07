@@ -151,6 +151,7 @@
   .cal-leyenda .punto { margin-right: 2px; }
   .cal-aviso { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; background: #fff7e0; border-left: 4px solid var(--ambar); padding: 8px 12px; margin-bottom: 10px; font-size: .875rem; }
   .cal-dia-titulo { font-size: 1rem; font-weight: 600; margin: 14px 0 8px; }
+  .version { text-align: center; color: var(--suave); font-size: .75rem; margin: 28px 0 0; }
   .guardar.sec { background: #fff; color: var(--acento); border: 1px solid var(--acento); margin-top: 8px; }
   .guardar.sec:hover:not(:disabled) { background: #f3f6f4; }
 
@@ -751,6 +752,7 @@
       <div class="lista" id="lista-cta"></div>
     </section>
   </div>
+  <footer class="version" id="version"></footer>
 </main>
 <div id="toast" role="status"></div>
 
@@ -3619,7 +3621,10 @@
   document.querySelectorAll('input[name=tipo]').forEach(function (r) { r.addEventListener('change', actualizarFormMov); });
   ['cuenta', 'cuenta-destino'].forEach(function (id) { $(id).addEventListener('change', actualizarFormMov); });
   ['monto', 'monto-dest'].forEach(function (id) { $(id).addEventListener('input', actualizarTC); });
-  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  const APP_VERSION = '7/10/2026 · calendario de pendientes';
+  $('version').textContent = 'Versión ' + APP_VERSION;
+  const esLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || esLocal)) {
     navigator.serviceWorker.register('sw.js').catch(function () { /* sin modo app: funciona igual como página */ });
   }
   cargar();
