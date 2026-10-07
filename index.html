@@ -729,17 +729,18 @@
   const masAbiertoCC = {};        // ídem por contraparte
   const $ = (id) => document.getElementById(id);
 
-  let TIMEOUT_LECTURA_MS = 30000, TIMEOUT_ESCRITURA_MS = 45000;
+  let TIMEOUT_LECTURA_MS = 30000, TIMEOUT_ESCRITURA_MS = 45000, REINTENTO_MS = 1500, TIMEOUT_PING_MS = 6000;
   const LECTURAS = ['todo', 'listar', 'saldos', 'cuentas_corrientes', 'avisos_estado'];
 
   async function api(action, data, opts) {
     opts = opts || {};
-    const sinSenal = function () {
+    const sinSenal = function (motivo) {
       const sin = new Error('Sin conexión o señal muy débil');
       sin.sinConexion = true;
+      sin.motivo = motivo;      // 'navegador' (sin red), 'tiempo' (no contestó a tiempo) o 'red' (falló la conexión)
       return sin;
     };
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) throw sinSenal();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) throw sinSenal('navegador');
     const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const limite = LECTURAS.indexOf(action) >= 0 ? TIMEOUT_LECTURA_MS : TIMEOUT_ESCRITURA_MS;
     const reloj = ctl ? setTimeout(function () { ctl.abort(); }, limite) : null;   // nunca queda esperando para siempre
@@ -758,7 +759,7 @@
         raro.respuestaRara = true;
         throw raro;
       }
-      throw sinSenal();
+      throw sinSenal(e && e.name === 'AbortError' ? 'tiempo' : 'red');
     } finally {
       if (reloj) clearTimeout(reloj);
     }
@@ -2129,12 +2130,27 @@
     });
   }
 
+  // ¿Hay internet en este dispositivo? Se prueba con un sitio de Google que no depende del script
+  async function hayInternet() {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return false;
+    const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const reloj = ctl ? setTimeout(function () { ctl.abort(); }, TIMEOUT_PING_MS) : null;
+    try {
+      await fetch('https://www.gstatic.com/generate_204?_=' + Date.now(), { mode: 'no-cors', cache: 'no-store', signal: ctl ? ctl.signal : undefined });
+      return true;
+    } catch (e) {
+      return false;
+    } finally {
+      if (reloj) clearTimeout(reloj);
+    }
+  }
+
   // Google a veces devuelve una página de error pasajera en vez de la respuesta: al reintentar casi siempre anda
   async function apiConReintento(action, data) {
     try { return await api(action, data); }
     catch (err) {
-      if (!err.respuestaRara) throw err;
-      await new Promise(function (r) { setTimeout(r, 1500); });
+      if (!err.respuestaRara && !(err.sinConexion && err.motivo === 'red')) throw err;
+      await new Promise(function (r) { setTimeout(r, REINTENTO_MS); });
       return api(action, data);
     }
   }
@@ -2195,13 +2211,25 @@
       if (envio.fallidos) toast(envio.fallidos + (envio.fallidos === 1 ? ' carga dio error: revisala arriba' : ' cargas dieron error: revisalas arriba'));
     } catch (err) {
       if (err.sinConexion) {
+        const internet = await hayInternet();
         const copia = leerCopiaLocal();
-        if (copia) {
-          aplicarDatos(copia.r);
-          aviso('Sin conexión', 'Estás viendo los datos guardados el ' + new Date(copia.t).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) +
-            '. Los gastos, transferencias, compras con tarjeta y pagos que cargues quedan guardados en el celular y se envían solos cuando vuelva la señal.');
+        if (copia) { try { aplicarDatos(copia.r); } catch (e) { /* copia de una versión vieja: se ignora */ } }
+        const cuando = copia ? new Date(copia.t).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) : '';
+        const guardado = 'Los gastos, transferencias, compras con tarjeta y pagos que cargues quedan guardados en el celular y se envían solos cuando vuelva la señal.';
+        if (!internet) {
+          aviso('Sin conexión', copia
+            ? 'No se detecta internet en este dispositivo. Estás viendo los datos guardados el ' + cuando + '. ' + guardado
+            : 'No se detecta internet. Todavía no hay datos guardados en este dispositivo: conectate y tocá Actualizar.');
         } else {
-          aviso('Sin conexión', 'Todavía no hay datos guardados en este dispositivo. Conectate y tocá Actualizar.');
+          const seg = Math.round(TIMEOUT_LECTURA_MS / 1000);
+          const porque = err.motivo === 'tiempo'
+            ? 'El script tardó más de ' + seg + (seg === 1 ? ' segundo' : ' segundos') + ' en contestar.'
+            : 'El navegador no pudo comunicarse con el script.';
+          aviso('Hay internet, pero el script de Google no responde', porque +
+            (copia ? ' Estás viendo los datos guardados el ' + cuando + '.' : ' Todavía no hay datos guardados en este dispositivo.') +
+            ' Probá Actualizar en un minuto. Si sigue igual, abrí la dirección del script en otra pestaña: tiene que mostrar {"ok":false,"error":"No autorizado"}.' +
+            ' Si ves otra cosa, revisá en Apps Script > Implementar > Administrar implementaciones que la implementación esté activa y que la dirección sea la misma. ' +
+            (copia ? guardado : ''));
         }
       } else if (/No existe la hoja/.test(err.message)) {
         aviso('Falta actualizar la planilla', 'En Apps Script ejecutá la función setup() una vez y tocá Actualizar. (' + err.message + ')');
