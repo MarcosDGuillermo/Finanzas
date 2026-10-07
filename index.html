@@ -124,6 +124,33 @@
   .filtro-cuenta { display: flex; align-items: center; gap: 10px; margin: 0 0 10px; }
   .filtro-cuenta label { font-size: .875rem; color: var(--suave); flex: none; }
   .filtro-cuenta select { flex: 1; min-width: 0; padding: 8px; font-size: 16px; }
+  .cab-lista { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  .cab-lista h2 { margin: 0; }
+  .vista-sel { display: flex; border: 1px solid var(--linea); border-radius: 8px; overflow: hidden; flex: none; }
+  .vista-sel button { background: #fff; border: 0; padding: 6px 14px; font: inherit; font-size: .875rem; color: var(--suave); cursor: pointer; }
+  .vista-sel button[aria-pressed=true] { background: var(--acento); color: #fff; }
+  .cal-nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .cal-mes { font-weight: 600; font-size: 1.0625rem; }
+  .cal-flecha { background: #fff; border: 1px solid var(--linea); border-radius: 8px; width: 44px; height: 38px; font-size: 1.375rem; line-height: 1; color: var(--tinta); cursor: pointer; }
+  .cal-sub { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; font-size: .875rem; color: var(--suave); flex-wrap: wrap; }
+  .cal-semana, .cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 5px; }
+  .cal-semana span { text-align: center; font-size: .6875rem; color: var(--suave); text-transform: uppercase; padding-bottom: 4px; }
+  .cal-dia { aspect-ratio: 1 / 1.1; background: #fff; border: 1px solid var(--linea); border-radius: 10px; padding: 5px 2px 4px; display: flex; flex-direction: column; align-items: center; justify-content: space-between; font: inherit; font-size: .9375rem; color: var(--tinta); cursor: pointer; min-width: 0; }
+  .cal-dia.hoy { border: 2px solid var(--acento); font-weight: 600; }
+  .cal-dia.venc { background: #fbeceb; border-color: #e5b8b3; }
+  .cal-dia.sel { background: var(--tinta); border-color: var(--tinta); color: #fff; }
+  .cal-puntos { display: flex; align-items: center; justify-content: center; gap: 2px; min-height: 10px; }
+  .punto { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+  .punto.pag { background: var(--gasto); }
+  .punto.cob { background: #2f9e63; }
+  .punto.tar { background: var(--dolar); }
+  .cal-dia.sel .punto { box-shadow: 0 0 0 1px #fff; }
+  .cal-mas { font-size: .625rem; line-height: 1; color: var(--suave); margin-left: 1px; }
+  .cal-dia.sel .cal-mas { color: #fff; }
+  .cal-leyenda { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 10px 0; font-size: .75rem; color: var(--suave); }
+  .cal-leyenda .punto { margin-right: 2px; }
+  .cal-aviso { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; background: #fff7e0; border-left: 4px solid var(--ambar); padding: 8px 12px; margin-bottom: 10px; font-size: .875rem; }
+  .cal-dia-titulo { font-size: 1rem; font-weight: 600; margin: 14px 0 8px; }
   .guardar.sec { background: #fff; color: var(--acento); border: 1px solid var(--acento); margin-top: 8px; }
   .guardar.sec:hover:not(:disabled) { background: #f3f6f4; }
 
@@ -456,8 +483,27 @@
     </section>
 
     <section>
-      <h2>Pendientes abiertos</h2>
+      <div class="cab-lista">
+        <h2>Pendientes abiertos</h2>
+        <div class="vista-sel" role="group" aria-label="Vista de pendientes">
+          <button type="button" id="vp-lista" aria-pressed="true">Lista</button>
+          <button type="button" id="vp-mes" aria-pressed="false">Mes</button>
+        </div>
+      </div>
       <div class="lista" id="lista-pen"></div>
+      <div id="cal-pen" hidden>
+        <div class="cal-nav">
+          <button type="button" class="cal-flecha" id="cal-ant" aria-label="Mes anterior">‹</button>
+          <div class="cal-mes" id="cal-titulo" aria-live="polite"></div>
+          <button type="button" class="cal-flecha" id="cal-sig" aria-label="Mes siguiente">›</button>
+        </div>
+        <div class="cal-sub"><span id="cal-totales"></span><button type="button" class="anular" id="cal-hoy">Ir a hoy</button></div>
+        <div class="cal-semana" aria-hidden="true"><span>Lun</span><span>Mar</span><span>Mié</span><span>Jue</span><span>Vie</span><span>Sáb</span><span>Dom</span></div>
+        <div class="cal-grid" id="cal-grid"></div>
+        <div class="cal-leyenda"><span><i class="punto pag"></i> A pagar</span><span><i class="punto tar"></i> Tarjeta</span><span><i class="punto cob"></i> A cobrar</span><span class="cal-venc-ley">Rosado: vencido sin registrar</span></div>
+        <div id="cal-avisos"></div>
+        <div id="cal-dia"></div>
+      </div>
     </section>
   </div>
 
@@ -1071,6 +1117,139 @@
   }
   function esEstimado(p) { return p.estimado === 'SI'; }
 
+  // ================= CALENDARIO DE PENDIENTES =================
+  let vistaPen = (function () { try { return localStorage.getItem('finanzas_vista_pen') === 'mes' ? 'mes' : 'lista'; } catch (e) { return 'lista'; } })();
+  let mesCal = '', diaCal = '';
+
+  function aplicarVistaPen() {
+    const mes = vistaPen === 'mes';
+    $('lista-pen').hidden = mes;
+    $('cal-pen').hidden = !mes;
+    $('vp-lista').setAttribute('aria-pressed', String(!mes));
+    $('vp-mes').setAttribute('aria-pressed', String(mes));
+  }
+  function cambiarVistaPen(v) {
+    vistaPen = v;
+    try { localStorage.setItem('finanzas_vista_pen', v); } catch (e) { /* sin espacio: se sigue igual */ }
+    aplicarVistaPen();
+    renderCalendarioPen();
+  }
+
+  function tipoPunto(p) { return p.esResumen ? 'tar' : (p.tipo === 'a_cobrar' ? 'cob' : 'pag'); }
+
+  // Hasta 3 puntos por día: primero uno por cada tipo presente (a pagar, tarjeta, a cobrar) y, si hay más ítems, se repiten
+  function puntosDia(lista) {
+    const orden = ['pag', 'tar', 'cob'];
+    const resto = { pag: 0, tar: 0, cob: 0 };
+    lista.forEach(function (p) { resto[tipoPunto(p)]++; });
+    const puntos = orden.filter(function (t) { return resto[t] > 0; });
+    puntos.forEach(function (t) { resto[t]--; });
+    while (puntos.length < 3) {
+      const t = orden.filter(function (x) { return resto[x] > 0; }).sort(function (a, b) { return resto[b] - resto[a]; })[0];
+      if (!t) break;
+      puntos.push(t); resto[t]--;
+    }
+    return puntos.sort(function (a, b) { return orden.indexOf(a) - orden.indexOf(b); });
+  }
+
+  function renderCalendarioPen() {
+    if (vistaPen !== 'mes') return;
+    const hoyIso = hoy();
+    if (!mesCal) mesCal = hoyIso.slice(0, 7);
+    const todos = itemsLista(true);                     // respeta el filtro de cuenta de la pestaña
+    const porDia = {};
+    todos.forEach(function (p) {
+      if (p.vencimiento && p.vencimiento.slice(0, 7) === mesCal) (porDia[p.vencimiento] = porDia[p.vencimiento] || []).push(p);
+    });
+    const y = Number(mesCal.slice(0, 4)), m = Number(mesCal.slice(5, 7));
+    const diasMes = new Date(y, m, 0).getDate();
+    const desfase = (new Date(y, m - 1, 1).getDay() + 6) % 7;   // la semana empieza el lunes
+
+    $('cal-titulo').textContent = nombreMes(mesCal + '-01').replace(/^./, function (c) { return c.toUpperCase(); });
+    // el día elegido se conserva si es de este mes; si no: hoy (en el mes actual) o el primer día con vencimientos
+    if (!diaCal || diaCal.slice(0, 7) !== mesCal) {
+      diaCal = mesCal === hoyIso.slice(0, 7) ? hoyIso : (Object.keys(porDia).sort()[0] || mesCal + '-01');
+    }
+
+    // totales del mes
+    const tot = {};
+    Object.keys(porDia).forEach(function (d) {
+      porDia[d].forEach(function (p) {
+        const t = tot[p.moneda] = tot[p.moneda] || { pagar: 0, cobrar: 0 };
+        if (p.tipo === 'a_cobrar') t.cobrar += saldoItem(p); else t.pagar += saldoItem(p);
+      });
+    });
+    const monedas = ordenMonedas(Object.keys(tot));
+    $('cal-totales').textContent = monedas.length
+      ? monedas.map(function (mon) { return 'A pagar ' + fmt0(tot[mon].pagar, mon) + ' · A cobrar ' + fmt0(tot[mon].cobrar, mon) + (monedas.length > 1 ? ' (' + mon + ')' : ''); }).join('  |  ')
+      : 'Sin vencimientos este mes';
+
+    // grilla
+    const grid = $('cal-grid');
+    grid.innerHTML = '';
+    for (let i = 0; i < desfase; i++) grid.appendChild(el('div', 'cal-vacio'));
+    for (let d = 1; d <= diasMes; d++) {
+      const iso = mesCal + '-' + ('0' + d).slice(-2);
+      const lista = porDia[iso] || [];
+      const b = el('button', 'cal-dia' + (iso === hoyIso ? ' hoy' : '') + (iso === diaCal ? ' sel' : '') + (lista.length && iso < hoyIso ? ' venc' : ''));
+      b.type = 'button';
+      b.setAttribute('aria-pressed', iso === diaCal ? 'true' : 'false');
+      b.setAttribute('aria-label', new Date(y, m - 1, d).toLocaleDateString('es-AR', { day: 'numeric', month: 'long' }) + ': ' +
+        (lista.length ? lista.length + (lista.length === 1 ? ' vencimiento' : ' vencimientos') : 'sin vencimientos'));
+      b.appendChild(el('span', 'cal-num', String(d)));
+      const pt = el('span', 'cal-puntos');
+      if (lista.length) {
+        const puntos = puntosDia(lista);
+        puntos.forEach(function (t) { pt.appendChild(el('i', 'punto ' + t)); });
+        const extra = lista.length - puntos.length;
+        if (extra > 0) pt.appendChild(el('span', 'cal-mas', '+' + extra));
+      }
+      b.appendChild(pt);
+      b.addEventListener('click', function () { diaCal = iso; renderCalendarioPen(); });
+      grid.appendChild(b);
+    }
+
+    // avisos: lo que el calendario no puede mostrar en este mes
+    const av = $('cal-avisos');
+    av.innerHTML = '';
+    const avisar = function (texto) {
+      const f = el('div', 'cal-aviso');
+      f.appendChild(el('span', '', texto));
+      const bt = el('button', 'anular', 'Ver en la lista');
+      bt.type = 'button';
+      bt.addEventListener('click', function () { cambiarVistaPen('lista'); });
+      f.appendChild(bt);
+      av.appendChild(f);
+    };
+    if (mesCal >= hoyIso.slice(0, 7)) {
+      const ant = todos.filter(function (p) { return p.vencimiento && p.vencimiento < mesCal + '-01' && p.vencimiento < hoyIso; });
+      if (ant.length) avisar(ant.length + (ant.length === 1 ? ' vencimiento de meses anteriores sin registrar' : ' vencimientos de meses anteriores sin registrar'));
+    }
+    const sinFecha = todos.filter(function (p) { return !p.vencimiento; });
+    if (sinFecha.length) avisar(sinFecha.length + (sinFecha.length === 1 ? ' pendiente sin fecha de vencimiento no aparece' : ' pendientes sin fecha de vencimiento no aparecen') + ' en el calendario');
+
+    // detalle del día elegido, con los mismos botones que la lista
+    const det = $('cal-dia');
+    det.innerHTML = '';
+    const lDia = (porDia[diaCal] || []).slice().sort(function (a, b) {
+      const ca = a.tipo === 'a_cobrar' ? 1 : 0, cb = b.tipo === 'a_cobrar' ? 1 : 0;
+      return ca !== cb ? ca - cb : saldoItem(b) - saldoItem(a);
+    });
+    const p = diaCal.split('-').map(Number);
+    let titulo = new Date(p[0], p[1] - 1, p[2]).toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' });
+    titulo = titulo.charAt(0).toUpperCase() + titulo.slice(1);
+    det.appendChild(el('h3', 'cal-dia-titulo', titulo + (lDia.length ? ' · ' + lDia.length + (lDia.length === 1 ? ' vencimiento' : ' vencimientos') : '') + (lDia.length && diaCal < hoyIso ? ' · vencidos' : '')));
+    const caja = el('div', 'lista');
+    if (!lDia.length) {
+      caja.appendChild(el('div', 'vacio', 'No hay vencimientos este día.'));
+    } else {
+      const nombreCp = {};
+      estado.contrapartes.forEach(function (c) { nombreCp[c.id] = c.nombre; });
+      agregarFilasPen(caja, lDia, nombreCp, true);
+    }
+    det.appendChild(caja);
+  }
+
   // Filtro de la pestaña Pendientes: se filtra por la cuenta prevista de pago. Los resúmenes de tarjeta no tienen.
   function pasaFiltroPen(x) {
     if (!filtroPen) return true;
@@ -1192,13 +1371,13 @@
     }
   }
 
-  function agregarFilasPen(cont, lista, nombreCp) {
+  function agregarFilasPen(cont, lista, nombreCp, sinMes) {
     let mesActual = null;
     lista.forEach(function (p) {
       const clave = p.vencimiento ? p.vencimiento.slice(0, 7) : 'sin';
       if (clave !== mesActual) {
         mesActual = clave;
-        cont.appendChild(el('div', 'mes-titulo', clave === 'sin' ? 'Sin vencimiento' : nombreMes(p.vencimiento)));
+        if (!sinMes) cont.appendChild(el('div', 'mes-titulo', clave === 'sin' ? 'Sin vencimiento' : nombreMes(p.vencimiento)));
       }
       if (p.esResumen) { cont.appendChild(filaResumen(p)); return; }
       const saldo = estado.saldoPen[p.id];
@@ -2001,6 +2180,8 @@
     renderContrapartes();
     renderResumenPen();
     renderListaPen();
+    renderCalendarioPen();
+    aplicarVistaPen();
     renderProyeccion();
     renderResumen();
     renderCategoriasPen();
@@ -3359,8 +3540,13 @@
     // al mirar una cuenta, el formulario de carga arranca en esa misma cuenta
     if (filtroMov && cuentaPorId(filtroMov)) { $('cuenta').value = filtroMov; actualizarFormMov(); }
   });
+  $('vp-lista').addEventListener('click', function () { cambiarVistaPen('lista'); });
+  $('vp-mes').addEventListener('click', function () { cambiarVistaPen('mes'); });
+  $('cal-ant').addEventListener('click', function () { mesCal = sumarMeses((mesCal || hoy().slice(0, 7)) + '-01', -1).slice(0, 7); renderCalendarioPen(); });
+  $('cal-sig').addEventListener('click', function () { mesCal = sumarMeses((mesCal || hoy().slice(0, 7)) + '-01', 1).slice(0, 7); renderCalendarioPen(); });
+  $('cal-hoy').addEventListener('click', function () { mesCal = hoy().slice(0, 7); diaCal = hoy(); renderCalendarioPen(); });
   $('btn-mov-mas').addEventListener('click', function () { movVisibles += MOV_PAGINA; renderMovimientos(); });
-  $('fil-pen').addEventListener('change', function () { filtroPen = this.value; renderResumenPen(); renderListaPen(); });
+  $('fil-pen').addEventListener('change', function () { filtroPen = this.value; renderResumenPen(); renderListaPen(); renderCalendarioPen(); });
   $('btn-cola-enviar').addEventListener('click', function () { reintentoManual = true; cargar(); });
   window.addEventListener('online', function () { cargar(); });
   document.addEventListener('visibilitychange', function () { if (!document.hidden && leerCola().length) cargar(); });
