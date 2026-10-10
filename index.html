@@ -1639,6 +1639,10 @@
         (p.debito === 'SI' ? ' · Débito automático' : ''));
       if (esEstimado(p)) { meta.appendChild(document.createTextNode(' · ')); meta.appendChild(el('span', 'estimado', 'Monto estimado')); }
       fila.appendChild(meta);
+      const proyec = montoProyectado(p, saldo);
+      if (Math.abs(proyec - saldo) > 0.5) {
+        fila.appendChild(el('div', 'meta', 'Con el ' + (cobra ? 'ajuste' : 'aumento') + ' previsto, la proyección cuenta ~ ' + fmt(proyec, p.moneda) + ' (lo cargado queda como está)'));
+      }
 
       if (p.vencimiento) {
         const d = diasHasta(p.vencimiento);
@@ -2005,6 +2009,15 @@
     return /sueldo|salario|haberes/i.test(nombreCategoria(p.categoria) || '');
   }
 
+  // Monto de un pendiente con la inflación / ajuste de sueldo previstos (igual a 's' si no corresponde)
+  function montoProyectado(p, s) {
+    if (p.moneda !== 'ARS' || !p.vencimiento || p.vencimiento < hoy()) return s;
+    const ym = p.vencimiento.slice(0, 7);
+    if (p.tipo === 'a_pagar' && esEstimado(p) && !p.tarjeta) return s * factorGastoMes(ym);
+    if (esIngresoAjustable(p)) return s * factorIngresoMes(ym);
+    return s;
+  }
+
   // Saldo acumulado mes a mes (hoy + vencidos + 6 meses) para una moneda
   function calcularProyeccion(mon) {
     const hoyIso = hoy();
@@ -2025,13 +2038,8 @@
       const y = Number(p.vencimiento.slice(0, 4)), m = Number(p.vencimiento.slice(5, 7));
       const idx = (y - y0) * 12 + (m - m0);
       if (idx >= 0 && idx < mesesProyeccion) {
-        let monto = s;
-        if (mon === 'ARS') {
-          const ym = p.vencimiento.slice(0, 7);
-          if (p.tipo === 'a_pagar' && esEstimado(p) && !p.tarjeta) monto = s * factorGastoMes(ym);
-          else if (esIngresoAjustable(p)) monto = s * factorIngresoMes(ym);
-          if (Math.abs(monto - s) > 0.5) meses[idx].est = true;
-        }
+        const monto = montoProyectado(p, s);
+        if (Math.abs(monto - s) > 0.5) meses[idx].est = true;
         meses[idx][k] += monto;
         if (esEstimado(p)) meses[idx].est = true;
       }
@@ -3953,7 +3961,7 @@
   document.querySelectorAll('input[name=tipo]').forEach(function (r) { r.addEventListener('change', actualizarFormMov); });
   ['cuenta', 'cuenta-destino'].forEach(function (id) { $(id).addEventListener('change', actualizarFormMov); });
   ['monto', 'monto-dest'].forEach(function (id) { $(id).addEventListener('input', actualizarTC); });
-  const APP_VERSION = '10/10/2026 · inflación y ajuste de sueldo';
+  const APP_VERSION = '10/10/2026 · inflación y ajuste de sueldo (v2)';
   $('version').textContent = 'Versión ' + APP_VERSION;
   const esLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || esLocal)) {
