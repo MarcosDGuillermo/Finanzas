@@ -99,7 +99,7 @@
   .campos { display: grid; gap: 12px; grid-template-columns: 1fr; }
   @media (min-width: 620px) { .campos { grid-template-columns: 1fr 1fr; } .campos .ancho { grid-column: 1 / -1; } }
   .campo label { display: block; font-size: .875rem; color: var(--suave); margin-bottom: 4px; }
-  input[type=text], input[type=date], input[type=password], input[type=number], select {
+  input[type=text], input[type=date], input[type=month], input[type=password], input[type=number], select {
     width: 100%; padding: 10px; border: 1px solid var(--linea); border-radius: 0;
     background: #fff; color: var(--tinta); font: inherit;
   }
@@ -544,7 +544,22 @@
   <!-- ============ PROYECCIÓN ============ -->
   <div id="vista-proy" role="tabpanel" hidden>
     <div class="filtro"><label for="sel-meses-proy">Ver proyección a</label> <select id="sel-meses-proy"><option value="3">3 meses</option><option value="6">6 meses</option><option value="12">12 meses</option><option value="18">18 meses</option><option value="24">24 meses</option></select></div>
+    <details class="nuevo" id="det-supuestos">
+      <summary>Inflación y ajuste de sueldo</summary>
+      <form id="form-sup" autocomplete="off">
+        <div class="campos">
+          <div class="campo"><label for="sup-infl">Inflación mensual esperada (%)</label><input type="number" id="sup-infl" step="0.1" min="0" max="30" inputmode="decimal"></div>
+          <div class="campo"><label for="sup-cada">El sueldo se ajusta cada</label><select id="sup-cada"><option value="3">3 meses</option><option value="4">4 meses</option><option value="6">6 meses</option><option value="12">12 meses</option></select></div>
+          <div class="campo"><label for="sup-mes">Próximo ajuste en</label><input type="month" id="sup-mes"></div>
+          <div class="campo"><label for="sup-modo">El aumento será</label><select id="sup-modo"><option value="inflacion">La inflación acumulada del período</option><option value="fijo">Un % fijo que yo defino</option></select></div>
+          <div class="campo" id="campo-sup-pct"><label for="sup-pct">% de cada ajuste</label><input type="number" id="sup-pct" step="0.1" min="-50" max="300" inputmode="decimal"></div>
+        </div>
+        <button class="guardar" type="submit" id="btn-sup">Guardar supuestos</button>
+        <p class="nota" id="sup-ayuda"></p>
+      </form>
+    </details>
     <div id="proyeccion" class="monedas"></div>
+    <p class="nota" id="nota-infl"></p>
     <p class="nota">Incluye tus pendientes, los resúmenes de tarjeta y lo que falta gastar de cada presupuesto, en el período elegido arriba. Para sueldo u otros ingresos fijos, cargalos como "A cobrar" repetidos por mes. Los meses con ~ incluyen montos estimados.</p>
   </div>
 
@@ -797,7 +812,7 @@
   function leerClave() { try { return localStorage.getItem('finanzas_clave') || ''; } catch (e) { return ''; } }
   function guardarClave(v) { try { if (v) localStorage.setItem('finanzas_clave', v); else localStorage.removeItem('finanzas_clave'); } catch (e) {} }
 
-  const estado = { cuentas: [], totales: {}, categorias: [], movimientos: [], pendientes: [], contrapartes: [], saldoPen: {}, cc: [], cuentasTodas: [], tarjetas: [], compras: [], presupuestos: [] };
+  const estado = { cuentas: [], totales: {}, categorias: [], movimientos: [], pendientes: [], contrapartes: [], saldoPen: {}, cc: [], cuentasTodas: [], tarjetas: [], compras: [], presupuestos: [], supuestos: { infl: 0, cada: 6, mes: '', modo: 'inflacion', pct: 0 } };
   const abiertoCC = {};
   const HORIZONTE_DIAS = 30;
   const MOV_PAGINA = 25;
@@ -1959,6 +1974,37 @@
     return { txt: 'Vence el ' + fmtFecha(p.vencimiento), clase: 'venc' };
   }
 
+  // ================= INFLACIÓN =================
+  // Solo pesos. Gastos estimados y presupuestos suben cada mes con la inflación; el sueldo sube de golpe en cada ajuste.
+  function idxMes(ym) { return Number(String(ym).slice(0, 4)) * 12 + Number(String(ym).slice(5, 7)) - 1; }
+  function supActivos() {
+    const s = estado.supuestos;
+    return s.infl > 0 || (s.mes && (s.modo === 'fijo' ? s.pct !== 0 : s.infl > 0));
+  }
+  function factorGastoMes(ym) {
+    const k = idxMes(ym) - idxMes(hoy().slice(0, 7));
+    return k > 0 ? Math.pow(1 + estado.supuestos.infl / 100, k) : 1;
+  }
+  function pasoIngresos() {
+    const s = estado.supuestos;
+    return s.modo === 'fijo' ? s.pct / 100 : Math.pow(1 + s.infl / 100, s.cada) - 1;
+  }
+  function cantidadAjustes(ym) {
+    const s = estado.supuestos;
+    if (!s.mes || !(s.cada >= 1)) return 0;
+    const actual = idxMes(hoy().slice(0, 7)), tope = idxMes(ym);
+    let a = idxMes(s.mes), n = 0;
+    while (a <= actual) a += s.cada;       // el ajuste del mes actual (o anterior) ya está en el sueldo cargado
+    for (; a <= tope; a += s.cada) n++;
+    return n;
+  }
+  function factorIngresoMes(ym) { return Math.pow(1 + pasoIngresos(), cantidadAjustes(ym)); }
+  function esIngresoAjustable(p) {
+    if (p.tipo !== 'a_cobrar') return false;
+    if (esEstimado(p)) return true;
+    return /sueldo|salario|haberes/i.test(nombreCategoria(p.categoria) || '');
+  }
+
   // Saldo acumulado mes a mes (hoy + vencidos + 6 meses) para una moneda
   function calcularProyeccion(mon) {
     const hoyIso = hoy();
@@ -1978,13 +2024,24 @@
       if (p.vencimiento < hoyIso) { venc[k] += s; venc.n++; return; }
       const y = Number(p.vencimiento.slice(0, 4)), m = Number(p.vencimiento.slice(5, 7));
       const idx = (y - y0) * 12 + (m - m0);
-      if (idx >= 0 && idx < mesesProyeccion) { meses[idx][k] += s; if (esEstimado(p)) meses[idx].est = true; }
+      if (idx >= 0 && idx < mesesProyeccion) {
+        let monto = s;
+        if (mon === 'ARS') {
+          const ym = p.vencimiento.slice(0, 7);
+          if (p.tipo === 'a_pagar' && esEstimado(p) && !p.tarjeta) monto = s * factorGastoMes(ym);
+          else if (esIngresoAjustable(p)) monto = s * factorIngresoMes(ym);
+          if (Math.abs(monto - s) > 0.5) meses[idx].est = true;
+        }
+        meses[idx][k] += monto;
+        if (esEstimado(p)) meses[idx].est = true;
+      }
     });
 
     // Presupuestos de gastos variables: lo que falta gastar de cada categoría en cada mes
     presupuestosActivos(mon).forEach(function (pre) {
       meses.forEach(function (mm) {
-        const rest = detallePresupuesto(pre, mm.y, mm.m).restante;
+        let rest = detallePresupuesto(pre, mm.y, mm.m).restante;
+        if (mon === 'ARS') rest *= factorGastoMes(mm.y + '-' + ('0' + mm.m).slice(-2));
         if (rest > 0.001) { mm.pagar += rest; mm.presup = (mm.presup || 0) + rest; mm.est = true; }
       });
     });
@@ -2186,6 +2243,27 @@
       fila.appendChild(el('div', iv.clase, iv.txt));
       lista.appendChild(fila);
     });
+  }
+
+  function renderSupuestos() {
+    const s = estado.supuestos;
+    if (document.activeElement && $('form-sup').contains(document.activeElement)) return;
+    $('sup-infl').value = s.infl ? String(s.infl) : '';
+    $('sup-cada').value = String(s.cada);
+    $('sup-mes').value = s.mes || '';
+    $('sup-modo').value = s.modo;
+    $('sup-pct').value = s.pct ? String(s.pct) : '';
+    $('campo-sup-pct').hidden = s.modo !== 'fijo';
+    const nota = $('nota-infl');
+    if (s.infl > 0 || (s.mes && s.modo === 'fijo' && s.pct)) {
+      const partes = [];
+      if (s.infl > 0) partes.push('Gastos estimados y presupuestos en pesos: +' + s.infl + '% por mes.');
+      if (s.mes) partes.push('Sueldo: +' + (Math.round(pasoIngresos() * 1000) / 10) + '% cada ' + s.cada + ' meses, todo junto, desde ' + s.mes + '.');
+      nota.textContent = 'Supuestos aplicados (solo pesos): ' + partes.join(' ') + ' Son estimaciones.';
+    } else {
+      nota.textContent = 'Sin inflación cargada: la proyección usa los montos tal cual están, como si los precios no subieran.';
+    }
+    $('sup-ayuda').textContent = 'Se aplica solo en pesos. Afecta a los gastos marcados como estimados, a los presupuestos y a los cobros marcados como estimados o con categoría sueldo/salario. El ajuste del mes actual se considera ya incluido en el sueldo que cargaste.';
   }
 
   function renderProyeccion() {
@@ -2401,6 +2479,7 @@
     estado.tarjetas = comoLista(r[7]);
     estado.compras = comoLista(r[8]);
     estado.presupuestos = comoLista(r[9]);
+    if (r[0].supuestos) estado.supuestos = r[0].supuestos;
     estado.saldoPen = {};
     r[0].pendientes.forEach(function (p) { estado.saldoPen[p.id] = p.saldo; });
     renderSaldos(r[0]);
@@ -2414,6 +2493,7 @@
     renderListaPen();
     renderCalendarioPen();
     aplicarVistaPen();
+    renderSupuestos();
     renderProyeccion();
     renderResumen();
     renderCategoriasPen();
@@ -2455,6 +2535,7 @@
       return 'Pago · ' + (p ? p.descripcion : 'pendiente') + ' ' + fmt(d.monto, c ? c.moneda : 'ARS');
     }
     if (action === 'pagar_resumen') return 'Pago de resumen ' + fmt(d.monto, d.moneda);
+    if (action === 'supuestos_guardar') return 'Supuestos de inflación';
     return action;
   }
 
@@ -3810,6 +3891,22 @@
   document.querySelectorAll('input[name=tipo-pen]').forEach(function (r) { r.addEventListener('change', renderCategoriasPen); });
   $('tab-pen').addEventListener('click', function () { mostrar('pen'); });
   $('tab-proy').addEventListener('click', function () { mostrar('proy'); });
+  $('sup-modo').addEventListener('change', function () { $('campo-sup-pct').hidden = this.value !== 'fijo'; });
+  $('form-sup').addEventListener('submit', async function (ev) {
+    ev.preventDefault();
+    const b = $('btn-sup'), t = b.textContent;
+    b.disabled = true; b.textContent = 'Guardando...';
+    const d = { infl: Number($('sup-infl').value || 0), cada: Number($('sup-cada').value), mes: $('sup-mes').value || '',
+                modo: $('sup-modo').value, pct: Number($('sup-pct').value || 0) };
+    try {
+      const r = await guardarOp('supuestos_guardar', d);
+      estado.supuestos = r && r.supuestos ? r.supuestos : d;
+      document.activeElement && document.activeElement.blur();
+      renderSupuestos(); renderProyeccion(); renderResumen();
+      toast(r && r.encolado ? 'Guardado en el celular, se envía cuando haya señal' : 'Supuestos guardados');
+    } catch (err) { toast('No se pudo: ' + err.message); }
+    finally { b.textContent = t; b.disabled = false; }
+  });
   $('tab-cp').addEventListener('click', function () { mostrar('cp'); });
   $('tab-cta').addEventListener('click', function () { mostrar('cta'); });
   $('form-cta').addEventListener('submit', guardarCuenta);
@@ -3856,7 +3953,7 @@
   document.querySelectorAll('input[name=tipo]').forEach(function (r) { r.addEventListener('change', actualizarFormMov); });
   ['cuenta', 'cuenta-destino'].forEach(function (id) { $(id).addEventListener('change', actualizarFormMov); });
   ['monto', 'monto-dest'].forEach(function (id) { $(id).addEventListener('input', actualizarTC); });
-  const APP_VERSION = '7/10/2026 · mapa de calor de movimientos';
+  const APP_VERSION = '10/10/2026 · inflación y ajuste de sueldo';
   $('version').textContent = 'Versión ' + APP_VERSION;
   const esLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || esLocal)) {
