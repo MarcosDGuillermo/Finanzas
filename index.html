@@ -1039,6 +1039,39 @@
     actualizarTC();
   }
 
+  // ---- Crear categorías nuevas desde cualquier selector ----
+  const NUEVA = '__nueva__';
+  function prepararNuevaCat(sel) {          // una sola vez por selector: arma el campo de nombre y lo muestra al elegir "+ Nueva"
+    if (sel._nuevoInput) return;
+    const inp = document.createElement('input');
+    inp.type = 'text'; inp.maxLength = 60; inp.placeholder = 'Nombre de la nueva categoría'; inp.hidden = true;
+    inp.style.marginTop = '8px';
+    sel.parentNode.appendChild(inp);
+    sel._nuevoInput = inp;
+    sel.addEventListener('change', function () {
+      inp.hidden = sel.value !== NUEVA;
+      if (sel.value === NUEVA) inp.focus();
+    });
+  }
+  function opcionNuevaCat(sel) {            // se agrega al final cada vez que se rellena el selector
+    prepararNuevaCat(sel);
+    const o = el('option', '', '+ Nueva categoría...');
+    o.value = NUEVA;
+    sel.appendChild(o);
+  }
+  function mostrarNuevaCat(sel) { if (sel._nuevoInput) sel._nuevoInput.hidden = sel.value !== NUEVA; }
+  // Devuelve el id de la categoría elegida; si eligió "+ Nueva", la crea (o reutiliza una igual que ya exista)
+  async function resolverCategoria(sel, tipo) {
+    if (sel.value !== NUEVA) return sel.value;
+    const nombre = sel._nuevoInput.value.trim();
+    if (!nombre) throw new Error('Escribí el nombre de la nueva categoría');
+    const ex = estado.categorias.filter(function (c) {
+      return c.tipo === tipo && String(c.nombre).trim().toLowerCase() === nombre.toLowerCase();
+    })[0];
+    if (ex) return ex.id;
+    return (await api('crear', { hoja: 'categorias', registro: { nombre: nombre, tipo: tipo } })).id;
+  }
+
   function renderCategorias() {
     const tipo = tipoMov();
     const sel = $('categoria');
@@ -1046,12 +1079,14 @@
     const sin = el('option', '', 'Sin categoría');
     sin.value = '';
     sel.appendChild(sin);
-    if (tipo === 'transf') return;
+    if (tipo === 'transf') { prepararNuevaCat(sel); sel._nuevoInput.hidden = true; return; }
     estado.categorias.filter(function (c) { return c.tipo === tipo; }).forEach(function (c) {
       const o = el('option', '', c.nombre);
       o.value = c.id;
       sel.appendChild(o);
     });
+    opcionNuevaCat(sel);
+    mostrarNuevaCat(sel);
   }
 
   function textoCuentaOpcion(c) { return c.nombre + ' (' + c.moneda + ')' + (c.activa === 'NO' ? ' · archivada' : ''); }
@@ -1788,13 +1823,35 @@
     estado.categorias.filter(function (c) { return c.tipo === (p.tipo === 'a_cobrar' ? 'ingreso' : 'gasto'); }).forEach(function (c) {
       const o = el('option', '', c.nombre); o.value = c.id; sCat.appendChild(o);
     });
-    sCat.value = p.categoria || '';
     cCat.appendChild(sCat);
     caja.appendChild(cCat);
+    opcionNuevaCat(sCat);
+    sCat.value = p.categoria || '';
     let fCatSerie = null;
     if (p.serie) {
       fCatSerie = campoCheck('Aplicar esta categoría a toda la serie', false);
       caja.appendChild(fCatSerie.caja);
+    }
+
+    const cCp = el('div', 'campo');
+    cCp.appendChild(el('label', '', 'Contraparte'));
+    const sCp = document.createElement('select');
+    const sinCp = el('option', '', 'Sin contraparte'); sinCp.value = ''; sCp.appendChild(sinCp);
+    estado.contrapartes.filter(function (c) { return c.activa !== 'NO' || c.id === p.contraparte; })
+      .sort(function (a, b) { return String(a.nombre).localeCompare(String(b.nombre)); })
+      .forEach(function (c) { const o = el('option', '', c.nombre); o.value = c.id; sCp.appendChild(o); });
+    const nuevaCp = el('option', '', '+ Nueva contraparte...'); nuevaCp.value = NUEVA; sCp.appendChild(nuevaCp);
+    sCp.value = p.contraparte || '';
+    cCp.appendChild(sCp);
+    const iCp = document.createElement('input');
+    iCp.type = 'text'; iCp.maxLength = 80; iCp.placeholder = 'Nombre de la nueva contraparte'; iCp.hidden = true; iCp.style.marginTop = '8px';
+    cCp.appendChild(iCp);
+    sCp.addEventListener('change', function () { iCp.hidden = sCp.value !== NUEVA; if (sCp.value === NUEVA) iCp.focus(); });
+    caja.appendChild(cCp);
+    let fCpSerie = null;
+    if (p.serie) {
+      fCpSerie = campoCheck('Aplicar esta contraparte a toda la serie', false);
+      caja.appendChild(fCpSerie.caja);
     }
 
     // Próximos de la serie que siguen estimados y sin pagos
@@ -1820,10 +1877,20 @@
       if (!(monto > 0)) { toast('Ingresá un monto mayor a 0'); fMonto.input.focus(); return; }
       ok.disabled = true; ok.textContent = 'Guardando...';
       try {
+        const catId = await resolverCategoria(sCat, p.tipo === 'a_cobrar' ? 'ingreso' : 'gasto');
+        let cpId = sCp.value;
+        if (cpId === NUEVA) {
+          const nombre = iCp.value.trim();
+          if (!nombre) throw new Error('Escribí el nombre de la nueva contraparte');
+          const ex = estado.contrapartes.filter(function (c) { return String(c.nombre).trim().toLowerCase() === nombre.toLowerCase(); })[0];
+          cpId = ex ? ex.id : (await api('crear', { hoja: 'contrapartes',
+            registro: { nombre: nombre, tipo: p.tipo === 'a_pagar' ? 'proveedor' : 'cliente', activa: 'SI' } })).id;
+        }
         const r = await api('editar_pendiente', {
           id: p.id, descripcion: iDesc.value.trim(), monto: monto, vencimiento: fVenc.input.value,
           estimado: fEst.input.checked, propagar: fProp ? fProp.input.checked : false,
-          categoria: sCat.value, categoria_serie: fCatSerie ? fCatSerie.input.checked : false
+          categoria: catId, categoria_serie: fCatSerie ? fCatSerie.input.checked : false,
+          contraparte: cpId, contraparte_serie: fCpSerie ? fCpSerie.input.checked : false
         });
         toast(r.propagados ? 'Guardado. También se actualizaron ' + r.propagados + ' más.' : 'Cambios guardados');
         await cargar();
@@ -2354,7 +2421,9 @@
       o.value = c.id;
       sel.appendChild(o);
     });
+    opcionNuevaCat(sel);
     if (previo && Array.prototype.some.call(sel.options, function (o) { return o.value === previo; })) sel.value = previo;
+    mostrarNuevaCat(sel);
   }
 
   // ================= CONTRAPARTES =================
@@ -2768,7 +2837,8 @@
       } else {
         const r = await guardarOp('crear', { hoja: 'movimientos', registro: {
           fecha: $('fecha').value, tipo: tipo, monto: monto, cuenta: $('cuenta').value,
-          categoria: $('categoria').value, descripcion: $('descripcion').value.trim() } });
+          categoria: await resolverCategoria($('categoria'), tipo), descripcion: $('descripcion').value.trim() } });
+        $('categoria')._nuevoInput.value = '';
         encolado = !!r.encolado;
         toast(encolado ? msgEncolado(r) : 'Movimiento guardado' + sufijoFiltro($('cuenta').value));
       }
@@ -2822,7 +2892,7 @@
       let conceptoFinal = $('p-desc').value.trim();
       if (repetir) conceptoFinal = conceptoFinal.replace(/\s*\d{1,2}\/\d{2,4}\s*$/, '').trim() || conceptoFinal;
       const base = { fecha: hoy(), contraparte: cp, tipo: tipo, descripcion: conceptoFinal,
-                     monto: monto, moneda: $('p-moneda').value, vencimiento: $('p-venc').value, categoria: $('p-cat').value,
+                     monto: monto, moneda: $('p-moneda').value, vencimiento: $('p-venc').value, categoria: await resolverCategoria($('p-cat'), tipo === 'a_pagar' ? 'gasto' : 'ingreso'),
                      cuenta_prevista: $('p-cta').value, debito: $('p-deb').checked ? 'SI' : '' };
       if (repetir) {
         const r = await api('crear_serie', { base: base, cantidad: cantidad, estimado: $('p-est').checked, frecuencia: frecuencia, dias: dias });
@@ -2833,7 +2903,7 @@
         toast('Pendiente guardado');
       }
       $('p-desc').value = ''; $('p-monto').value = ''; $('p-venc').value = '';
-      $('p-nueva-cp').value = ''; $('p-cp').value = ''; $('p-rep').value = '1'; $('p-est').checked = false; $('p-cat').value = ''; $('p-cta').value = ''; $('p-deb').checked = false; diasTocados = false;
+      $('p-nueva-cp').value = ''; $('p-cp').value = ''; $('p-rep').value = '1'; $('p-est').checked = false; $('p-cat').value = ''; $('p-cat')._nuevoInput.value = ''; $('p-cat')._nuevoInput.hidden = true; $('p-cta').value = ''; $('p-deb').checked = false; diasTocados = false;
       document.querySelectorAll('input[name=dia]').forEach(function (c) { c.checked = false; });
       actualizarPreviewSerie();
       $('det-nuevo').open = false;
@@ -3508,7 +3578,9 @@
     estado.categorias.filter(function (c) { return c.tipo === 'gasto'; }).forEach(function (c) {
       const o = el('option', '', c.nombre); o.value = c.id; sc.appendChild(o);
     });
+    opcionNuevaCat(sc);
     if (catPrevia) sc.value = catPrevia;
+    mostrarNuevaCat(sc);
     renderOpcionesResumen();
     actualizarPreviewCompra();
 
@@ -3693,7 +3765,7 @@
       const r = await guardarOp('comprar_tarjeta', {
         tarjeta: $('k-tar').value, fecha: $('k-fecha').value, descripcion: $('k-desc').value.trim(),
         monto: monto, moneda: $('k-mon').value, cuotas: cuotas, monto_cuota: valorCuota,
-        categoria: $('k-cat').value, primer_mes: $('k-res').value
+        categoria: await resolverCategoria($('k-cat'), 'gasto'), primer_mes: $('k-res').value
       });
       $('k-desc').value = ''; $('k-monto').value = ''; $('k-vcuota').value = '';
       $('k-cuotas').value = '1';
@@ -3961,7 +4033,7 @@
   document.querySelectorAll('input[name=tipo]').forEach(function (r) { r.addEventListener('change', actualizarFormMov); });
   ['cuenta', 'cuenta-destino'].forEach(function (id) { $(id).addEventListener('change', actualizarFormMov); });
   ['monto', 'monto-dest'].forEach(function (id) { $(id).addEventListener('input', actualizarTC); });
-  const APP_VERSION = '10/10/2026 · inflación y ajuste de sueldo (v2)';
+  const APP_VERSION = '11/10/2026 · categorías nuevas y cambio de contraparte';
   $('version').textContent = 'Versión ' + APP_VERSION;
   const esLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || esLocal)) {
