@@ -476,6 +476,18 @@
               <label for="p-cta">Cuenta prevista (opcional)</label>
               <select id="p-cta"></select>
             </div>
+            <div class="campo ancho check" id="wrap-p-usd-chk" hidden>
+              <input type="checkbox" id="p-usd">
+              <label for="p-usd">Es una compra de dólares (pasa plata de una cuenta en pesos a una en dólares)</label>
+            </div>
+            <div class="campo" id="wrap-p-usd-monto" hidden>
+              <label for="p-usd-monto">Dólares que entran (US$)</label>
+              <input type="text" id="p-usd-monto" inputmode="decimal" placeholder="0,00">
+            </div>
+            <div class="campo" id="wrap-p-usd-cta" hidden>
+              <label for="p-usd-cta">Cuenta en dólares donde entran</label>
+              <select id="p-usd-cta"></select>
+            </div>
             <div class="campo check">
               <input type="checkbox" id="p-deb">
               <label for="p-deb">Débito automático</label>
@@ -553,6 +565,7 @@
           <div class="campo"><label for="sup-cada">El sueldo se ajusta cada</label><select id="sup-cada"><option value="3">3 meses</option><option value="4">4 meses</option><option value="6">6 meses</option><option value="12">12 meses</option></select></div>
           <div class="campo"><label for="sup-mes">Próximo ajuste en</label><input type="month" id="sup-mes"></div>
           <div class="campo"><label for="sup-modo">El aumento será</label><select id="sup-modo"><option value="inflacion">La inflación acumulada del período</option><option value="fijo">Un % fijo que yo defino</option></select></div>
+          <div class="campo"><label for="sup-tc">Dólar para el total en pesos ($ por US$)</label><input type="number" id="sup-tc" step="1" min="0" inputmode="decimal" placeholder="Ej.: 1500. Vacío = sin total"></div>
           <div class="campo" id="campo-sup-pct"><label for="sup-pct">% de cada ajuste</label><input type="number" id="sup-pct" step="0.1" min="-50" max="300" inputmode="decimal"></div>
         </div>
         <button class="guardar" type="submit" id="btn-sup">Guardar supuestos</button>
@@ -822,7 +835,7 @@
   function leerClave() { try { return localStorage.getItem('finanzas_clave') || ''; } catch (e) { return ''; } }
   function guardarClave(v) { try { if (v) localStorage.setItem('finanzas_clave', v); else localStorage.removeItem('finanzas_clave'); } catch (e) {} }
 
-  const estado = { cuentas: [], totales: {}, categorias: [], movimientos: [], pendientes: [], contrapartes: [], saldoPen: {}, cc: [], cuentasTodas: [], tarjetas: [], compras: [], presupuestos: [], supuestos: { infl: 0, cada: 6, mes: '', modo: 'inflacion', pct: 0 } };
+  const estado = { cuentas: [], totales: {}, categorias: [], movimientos: [], pendientes: [], contrapartes: [], saldoPen: {}, cc: [], cuentasTodas: [], tarjetas: [], compras: [], presupuestos: [], supuestos: { infl: 0, cada: 6, mes: '', modo: 'inflacion', pct: 0, tc: 0 } };
   const abiertoCC = {};
   const HORIZONTE_DIAS = 30;
   const MOV_PAGINA = 25;
@@ -1703,6 +1716,11 @@
         (p.debito === 'SI' ? ' · Débito automático' : ''));
       if (esEstimado(p)) { meta.appendChild(document.createTextNode(' · ')); meta.appendChild(el('span', 'estimado', 'Monto estimado')); }
       fila.appendChild(meta);
+      if (p.dest_cuenta) {
+        const cd = cuentaPorId(p.dest_cuenta);
+        const dm = Number(p.dest_monto) * (Number(p.monto) > 0 ? saldo / Number(p.monto) : 1);
+        fila.appendChild(el('div', 'meta', 'Compra de dólares · entran ' + fmt(dm, cd ? cd.moneda : 'USD') + (cd ? ' en ' + cd.nombre : '')));
+      }
       const proyec = montoProyectado(p, saldo);
       if (Math.abs(proyec - saldo) > 0.5) {
         fila.appendChild(el('div', 'meta', 'Con el ' + (cobra ? 'ajuste' : 'aumento') + ' previsto, la proyección cuenta ~ ' + fmt(proyec, p.moneda) + ' (lo cargado queda como está)'));
@@ -1721,9 +1739,9 @@
       }
 
       const acc = el('div', 'acciones');
-      const bPagar = el('button', 'principal', cobra ? 'Registrar cobro' : 'Registrar pago');
+      const bPagar = el('button', 'principal', p.dest_cuenta ? 'Concretar compra' : cobra ? 'Registrar cobro' : 'Registrar pago');
       bPagar.type = 'button';
-      bPagar.addEventListener('click', function () { togglePago(p, fila, saldo); });
+      bPagar.addEventListener('click', function () { if (p.dest_cuenta) toggleConcretar(p, fila, saldo); else togglePago(p, fila, saldo); });
       const bEditar = el('button', 'anular', 'Editar monto o fecha');
       bEditar.type = 'button';
       bEditar.addEventListener('click', function () { toggleEditar(p, fila); });
@@ -1823,6 +1841,71 @@
     fMonto.input.focus();
   }
 
+  function toggleConcretar(p, fila, saldo) {
+    if (cerrarForms(fila, 'pago')) return;
+    const caja = el('div', 'pago-form');
+    caja.setAttribute('data-tipo', 'pago');
+    const cDest = cuentaPorId(p.dest_cuenta);
+    const monedaD = cDest ? cDest.moneda : 'USD';
+    const cuentasO = estado.cuentas.filter(function (c) { return c.moneda === p.moneda; });
+    const cuentasD = estado.cuentas.filter(function (c) { return c.moneda !== p.moneda; });
+    if (!cuentasO.length || !cuentasD.length) {
+      caja.appendChild(el('div', '', 'Necesitás una cuenta en pesos y una en dólares. Creálas en la pestaña Cuentas.'));
+      fila.appendChild(caja); return;
+    }
+    caja.appendChild(el('div', 'nota', 'Es una transferencia entre tus cuentas: no cuenta como gasto. Poné lo que realmente pagaste y lo que te acreditaron.'));
+    const dmPrev = Number(p.dest_monto) * (Number(p.monto) > 0 ? saldo / Number(p.monto) : 1);
+    const campos = el('div', 'campos');
+    const fPesos = campoTexto('Pesos que salieron', String(saldo.toFixed(2)).replace('.', ','), 'monto');
+    const fUsd = campoTexto('Dólares que entraron', String(dmPrev.toFixed(2)).replace('.', ','), 'monto');
+    const fFecha = campoFecha('Fecha', hoy());
+    const mkSel = function (rotulo, lista, previa) {
+      const c = el('div', 'campo ancho'); c.appendChild(el('label', '', rotulo));
+      const sl = document.createElement('select');
+      lista.forEach(function (x) { const o = el('option', '', x.nombre + ' (' + x.moneda + ')'); o.value = x.id; sl.appendChild(o); });
+      if (previa && lista.some(function (x) { return x.id === previa; })) sl.value = previa;
+      c.appendChild(sl); return { caja: c, sel: sl };
+    };
+    const sO = mkSel('Cuenta en pesos de donde salen', cuentasO, p.cuenta_prevista);
+    const sD = mkSel('Cuenta en dólares donde entran', cuentasD, p.dest_cuenta);
+    campos.appendChild(fPesos.caja); campos.appendChild(fUsd.caja); campos.appendChild(fFecha.caja);
+    campos.appendChild(sO.caja); campos.appendChild(sD.caja);
+    caja.appendChild(campos);
+    const tcTxt = el('div', 'nota');
+    const actualizarTc = function () {
+      const a = parseMonto(fPesos.input.value), b = parseMonto(fUsd.input.value);
+      tcTxt.textContent = a > 0 && b > 0 ? 'Dólar a ' + fmt(a / b, p.moneda) + ' por ' + monedaD : '';
+    };
+    fPesos.input.addEventListener('input', actualizarTc); fUsd.input.addEventListener('input', actualizarTc); actualizarTc();
+    caja.appendChild(tcTxt);
+
+    const botones = el('div', 'botones');
+    const ok = el('button', 'principal', 'Confirmar compra');
+    ok.type = 'button';
+    const cancelar = el('button', 'anular', 'Cancelar');
+    cancelar.type = 'button';
+    cancelar.addEventListener('click', function () { caja.remove(); });
+    ok.addEventListener('click', async function () {
+      const mO = parseMonto(fPesos.input.value), mD = parseMonto(fUsd.input.value);
+      if (!(mO > 0) || !(mD > 0)) { toast('Completá los dos montos'); return; }
+      if (mO > saldo + 0.001) { toast('Los pesos superan lo pendiente (' + fmt(saldo, p.moneda) + ')'); return; }
+      ok.disabled = true; ok.textContent = 'Guardando...';
+      try {
+        const r = await guardarOp('concretar_compra', { pendiente: p.id, origen: sO.sel.value, destino: sD.sel.value,
+          monto_origen: mO, monto_destino: mD, fecha: fFecha.input.value });
+        if (r.encolado) { toast(msgEncolado(r)); caja.remove(); }
+        else { toast('Compra registrada' + (r.tc ? ' (dólar a ' + fmt(r.tc, 'ARS') + ')' : '')); await cargar(); }
+      } catch (err) {
+        toast('No se registró: ' + err.message);
+        ok.disabled = false; ok.textContent = 'Confirmar compra';
+      }
+    });
+    botones.appendChild(ok); botones.appendChild(cancelar);
+    caja.appendChild(botones);
+    fila.appendChild(caja);
+    fPesos.input.focus();
+  }
+
   function toggleEditar(p, fila) {
     if (cerrarForms(fila, 'editar')) return;
     const caja = el('div', 'pago-form');
@@ -1838,6 +1921,11 @@
     cDesc.appendChild(iDesc);
     campos.appendChild(cDesc);
     campos.appendChild(fMonto.caja); campos.appendChild(fVenc.caja);
+    let fDest = null;
+    if (p.dest_cuenta) {
+      fDest = campoTexto('Dólares que entran', String(Number(p.dest_monto).toFixed(2)).replace('.', ','), 'monto');
+      campos.appendChild(fDest.caja);
+    }
     caja.appendChild(campos);
 
     const fEst = campoCheck('Sigue siendo un valor estimado', esEstimado(p));
@@ -1919,7 +2007,8 @@
           id: p.id, descripcion: iDesc.value.trim(), monto: monto, vencimiento: fVenc.input.value,
           estimado: fEst.input.checked, propagar: fProp ? fProp.input.checked : false,
           categoria: catId, categoria_serie: fCatSerie ? fCatSerie.input.checked : false,
-          contraparte: cpId, contraparte_serie: fCpSerie ? fCpSerie.input.checked : false
+          contraparte: cpId, contraparte_serie: fCpSerie ? fCpSerie.input.checked : false,
+          dest_monto: fDest ? parseMonto(fDest.input.value) : undefined
         });
         toast(r.propagados ? 'Guardado. También se actualizaron ' + r.propagados + ' más.' : 'Cambios guardados');
         await cargar();
@@ -2126,18 +2215,28 @@
     const venc = { cobrar: 0, pagar: 0, n: 0 };
     const sinFecha = { cobrar: 0, pagar: 0, n: 0 };
 
-    abiertos().filter(function (p) { return p.moneda === mon; }).forEach(function (p) {
-      const s = estado.saldoPen[p.id];
+    // Compras de dólares programadas: en pesos salen como pago; en la moneda de destino entran como cobro
+    const entradas = [];
+    abiertos().forEach(function (p) {
+      if (!p.dest_cuenta || p.moneda === mon) return;
+      const cd = cuentaPorId(p.dest_cuenta);
+      if (!cd || cd.moneda !== mon) return;
+      const sp = estado.saldoPen[p.id];
+      entradas.push({ id: p.id, moneda: mon, tipo: 'a_cobrar', vencimiento: p.vencimiento, sintetico: true,
+                      saldo: Number(p.dest_monto) * (Number(p.monto) > 0 ? sp / Number(p.monto) : 1) });
+    });
+    abiertos().filter(function (p) { return p.moneda === mon; }).concat(entradas).forEach(function (p) {
+      const s = p.sintetico ? p.saldo : estado.saldoPen[p.id];
       const k = p.tipo === 'a_cobrar' ? 'cobrar' : 'pagar';
       if (!p.vencimiento) { sinFecha[k] += s; sinFecha.n++; return; }
       if (p.vencimiento < hoyIso) { venc[k] += s; venc.n++; return; }
       const y = Number(p.vencimiento.slice(0, 4)), m = Number(p.vencimiento.slice(5, 7));
       const idx = (y - y0) * 12 + (m - m0);
       if (idx >= 0 && idx < mesesProyeccion) {
-        const monto = montoProyectado(p, s);
-        if (Math.abs(monto - s) > 0.5) meses[idx].est = true;
+        const monto = p.sintetico ? s : montoProyectado(p, s);
+        if (Math.abs(monto - s) > 0.5 || p.sintetico) meses[idx].est = true;
         meses[idx][k] += monto;
-        if (esEstimado(p)) meses[idx].est = true;
+        if (!p.sintetico && esEstimado(p)) meses[idx].est = true;
       }
     });
 
@@ -2153,12 +2252,12 @@
     const saldoHoy = estado.totales[mon] || 0;
     let acumulado = saldoHoy;
     let minimo = { valor: saldoHoy, etiqueta: 'hoy' };
-    const filas = [{ clase: 'inicio', etiqueta: 'Hoy', corto: 'Hoy', cobrar: null, pagar: null, saldo: saldoHoy, est: false }];
+    const filas = [{ clave: 'hoy', clase: 'inicio', etiqueta: 'Hoy', corto: 'Hoy', cobrar: null, pagar: null, saldo: saldoHoy, est: false }];
 
     if (venc.n) {
       acumulado += venc.cobrar - venc.pagar;
       if (acumulado < minimo.valor) minimo = { valor: acumulado, etiqueta: 'después de los vencidos' };
-      filas.push({ clase: '', etiqueta: 'Vencidos', corto: 'Venc.', cobrar: venc.cobrar, pagar: venc.pagar, saldo: acumulado, est: false });
+      filas.push({ clave: 'venc', clase: '', etiqueta: 'Vencidos', corto: 'Venc.', cobrar: venc.cobrar, pagar: venc.pagar, saldo: acumulado, est: false });
     }
     meses.forEach(function (mm) {
       acumulado += mm.cobrar - mm.pagar;
@@ -2167,12 +2266,42 @@
       const largo = fecha.toLocaleDateString('es-AR', { month: 'short', year: 'numeric' }).replace('.', '');
       const nombre = fecha.toLocaleDateString('es-AR', { month: 'long', year: 'numeric' });
       if (acumulado < minimo.valor) minimo = { valor: acumulado, etiqueta: 'en ' + nombre };
-      filas.push({ clase: '', etiqueta: largo + (mm.est ? ' ~' : ''), corto: corto + (mm.est ? '~' : ''), anio: String(mm.y).slice(2),
+      filas.push({ clave: mm.y + '-' + mm.m, clase: '', etiqueta: largo + (mm.est ? ' ~' : ''), corto: corto + (mm.est ? '~' : ''), anio: String(mm.y).slice(2),
                    cobrar: mm.cobrar, pagar: mm.pagar, saldo: acumulado, est: mm.est });
     });
 
     const hayDatos = venc.n > 0 || meses.some(function (mm) { return mm.cobrar > 0 || mm.pagar > 0; });
     return { filas: filas, minimo: minimo, sinFecha: sinFecha, saldoHoy: saldoHoy, hayDatos: hayDatos, presupMes: meses[0].presup || 0 };
+  }
+
+  // Total en pesos: suma la proyección en pesos y la de dólares convertida al dólar elegido en los supuestos
+  function combinarProyecciones(pesos, dolares, tc) {
+    const claves = [];
+    [pesos, dolares].forEach(function (pr) { pr.filas.forEach(function (f) { if (claves.indexOf(f.clave) < 0) claves.push(f.clave); }); });
+    claves.sort(function (a, b) {
+      const o = function (c) { return c === 'hoy' ? -2 : c === 'venc' ? -1 : (Number(c.split('-')[0]) * 12 + Number(c.split('-')[1])); };
+      return o(a) - o(b);
+    });
+    const ult = { p: pesos.saldoHoy, d: dolares.saldoHoy };
+    const filas = [];
+    let minimo = { valor: Infinity, etiqueta: '' };
+    claves.forEach(function (c) {
+      const fp = pesos.filas.filter(function (f) { return f.clave === c; })[0];
+      const fd = dolares.filas.filter(function (f) { return f.clave === c; })[0];
+      if (fp) ult.p = fp.saldo;
+      if (fd) ult.d = fd.saldo;
+      const ref = fp || fd;
+      const total = ult.p + ult.d * tc;
+      const hoyFila = c === 'hoy';
+      const cobrar = hoyFila ? null : (fp ? fp.cobrar : 0) + (fd ? fd.cobrar * tc : 0);
+      const pagar = hoyFila ? null : (fp ? fp.pagar : 0) + (fd ? fd.pagar * tc : 0);
+      const est = (fp && fp.est) || (fd && fd.est);
+      const etiqueta = (ref.etiqueta || '').replace(/ ~$/, '') + (est && !hoyFila ? ' ~' : '');
+      filas.push({ clave: c, clase: ref.clase, etiqueta: etiqueta, corto: ref.corto, anio: ref.anio, cobrar: cobrar, pagar: pagar, saldo: total, est: !!est });
+      if (total < minimo.valor) minimo = { valor: total, etiqueta: hoyFila ? 'hoy' : c === 'venc' ? 'después de los vencidos' : 'en ' + etiqueta.replace(/ ~$/, '') };
+    });
+    return { filas: filas, minimo: minimo, sinFecha: { n: 0, pagar: 0, cobrar: 0 }, saldoHoy: pesos.saldoHoy + dolares.saldoHoy * tc,
+             hayDatos: pesos.hayDatos || dolares.hayDatos, presupMes: 0 };
   }
 
   function fraseMinimo(proy, mon) {
@@ -2357,6 +2486,7 @@
     $('sup-mes').value = s.mes || '';
     $('sup-modo').value = s.modo;
     $('sup-pct').value = s.pct ? String(s.pct) : '';
+    $('sup-tc').value = s.tc ? String(s.tc) : '';
     $('campo-sup-pct').hidden = s.modo !== 'fijo';
     const nota = $('nota-infl');
     if (s.infl > 0 || (s.mes && s.modo === 'fijo' && s.pct)) {
@@ -2381,15 +2511,19 @@
       cont.appendChild(v);
       return;
     }
-    monedas.forEach(function (mon) {
-      const proy = calcularProyeccion(mon);
+    const tcTotal = Number(estado.supuestos.tc) || 0;
+    const listaMon = tcTotal > 0 && monedas.indexOf('ARS') >= 0 && monedas.indexOf('USD') >= 0 ? ['TOTAL'].concat(monedas) : monedas;
+    listaMon.forEach(function (mon) {
+      const esTotal = mon === 'TOTAL';
+      const proy = esTotal ? combinarProyecciones(calcularProyeccion('ARS'), calcularProyeccion('USD'), tcTotal) : calcularProyeccion(mon);
       const bloque = el('div', 'moneda' + (mon === 'USD' ? ' usd' : ''));
       bloque.style.padding = '16px 0 8px';
-      const cab = el('div', 'rotulo', nombreMoneda(mon));
+      const cab = el('div', 'rotulo', esTotal ? 'Total en pesos (dólar a ' + fmt0(tcTotal, 'ARS') + ')' : nombreMoneda(mon));
       cab.style.padding = '0 16px';
       bloque.appendChild(cab);
 
-      const fr = fraseMinimo(proy, mon);
+      const fr = fraseMinimo(proy, esTotal ? 'ARS' : mon);
+      const mf = esTotal ? 'ARS' : mon;
       const resumen = el('p', 'proy-resumen');
       if (fr.neg) resumen.appendChild(el('span', 'neg', fr.texto)); else resumen.textContent = fr.texto;
       bloque.appendChild(resumen);
@@ -2405,9 +2539,9 @@
       proy.filas.forEach(function (f) {
         const tr = el('tr', f.clase);
         tr.appendChild(el('td', '', f.etiqueta));
-        tr.appendChild(el('td', f.cobrar > 0 ? 'pos' : '', f.cobrar === null ? '' : f.cobrar > 0 ? fmt0(f.cobrar, mon) : '–'));
-        tr.appendChild(el('td', f.pagar > 0 ? 'neg' : '', f.pagar === null ? '' : f.pagar > 0 ? fmt0(f.pagar, mon) : '–'));
-        tr.appendChild(el('td', 'saldo' + (f.saldo < 0 ? ' neg' : ''), fmt0(f.saldo, mon)));
+        tr.appendChild(el('td', f.cobrar > 0 ? 'pos' : '', f.cobrar === null ? '' : f.cobrar > 0 ? fmt0(f.cobrar, mf) : '–'));
+        tr.appendChild(el('td', f.pagar > 0 ? 'neg' : '', f.pagar === null ? '' : f.pagar > 0 ? fmt0(f.pagar, mf) : '–'));
+        tr.appendChild(el('td', 'saldo' + (f.saldo < 0 ? ' neg' : ''), fmt0(f.saldo, mf)));
         tbody.appendChild(tr);
       });
       tabla.appendChild(tbody);
@@ -2424,6 +2558,23 @@
   }
 
   // Categorías del formulario de pendientes (gasto para "a pagar", ingreso para "a cobrar")
+  // Compra de dólares: solo aplica a "a pagar" en pesos, con al menos una cuenta en dólares
+  function cuentasDestinoUsd(monedaOrigen) { return estado.cuentas.filter(function (c) { return c.moneda !== monedaOrigen; }); }
+  function actualizarUsdPen() {
+    const tipo = document.querySelector('input[name=tipo-pen]:checked').value;
+    const posible = tipo === 'a_pagar' && $('p-moneda').value === 'ARS' && cuentasDestinoUsd('ARS').length > 0;
+    $('wrap-p-usd-chk').hidden = !posible;
+    if (!posible) $('p-usd').checked = false;
+    const on = posible && $('p-usd').checked;
+    $('wrap-p-usd-monto').hidden = !on;
+    $('wrap-p-usd-cta').hidden = !on;
+    const sel = $('p-usd-cta'), previo = sel.value;
+    sel.innerHTML = '';
+    cuentasDestinoUsd('ARS').forEach(function (c) { const o = el('option', '', c.nombre + ' (' + c.moneda + ')'); o.value = c.id; sel.appendChild(o); });
+    if (previo) sel.value = previo;
+    if (on && !$('p-desc').value.trim()) $('p-desc').value = 'Compra de dólares';
+  }
+
   function renderCuentaPrevista() {
     const sel = $('p-cta');
     const previo = sel.value;
@@ -2604,6 +2755,7 @@
     renderResumen();
     renderCategoriasPen();
     renderCuentaPrevista();
+    actualizarUsdPen();
     renderCC();
     renderCuentasAdmin();
     renderTarjetas();
@@ -2641,6 +2793,7 @@
       return 'Pago · ' + (p ? p.descripcion : 'pendiente') + ' ' + fmt(d.monto, c ? c.moneda : 'ARS');
     }
     if (action === 'suscribir_tarjeta') return 'Suscripción ' + d.descripcion + ' ' + fmt(d.monto, d.moneda) + ' x ' + d.meses + ' meses';
+    if (action === 'concretar_compra') return 'Compra de dólares';
     if (action === 'pagar_resumen') return 'Pago de resumen ' + fmt(d.monto, d.moneda);
     if (action === 'supuestos_guardar') return 'Supuestos de inflación';
     return action;
@@ -2924,6 +3077,12 @@
       const base = { fecha: hoy(), contraparte: cp, tipo: tipo, descripcion: conceptoFinal,
                      monto: monto, moneda: $('p-moneda').value, vencimiento: $('p-venc').value, categoria: await resolverCategoria($('p-cat'), tipo === 'a_pagar' ? 'gasto' : 'ingreso'),
                      cuenta_prevista: $('p-cta').value, debito: $('p-deb').checked ? 'SI' : '' };
+      if ($('p-usd').checked) {
+        const dm = parseMonto($('p-usd-monto').value);
+        if (!(dm > 0)) throw new Error('Indicá cuántos dólares entran');
+        if (!$('p-cta').value) throw new Error('Elegí la cuenta en pesos de donde salen (Cuenta prevista)');
+        base.dest_monto = dm; base.dest_cuenta = $('p-usd-cta').value;
+      }
       if (repetir) {
         const r = await api('crear_serie', { base: base, cantidad: cantidad, estimado: $('p-est').checked, frecuencia: frecuencia, dias: dias });
         toast('Se crearon ' + r.creados + ' pendientes');
@@ -2933,7 +3092,7 @@
         toast('Pendiente guardado');
       }
       $('p-desc').value = ''; $('p-monto').value = ''; $('p-venc').value = '';
-      $('p-nueva-cp').value = ''; $('p-cp').value = ''; $('p-rep').value = '1'; $('p-est').checked = false; $('p-cat').value = ''; $('p-cat')._nuevoInput.value = ''; $('p-cat')._nuevoInput.hidden = true; $('p-cta').value = ''; $('p-deb').checked = false; diasTocados = false;
+      $('p-nueva-cp').value = ''; $('p-cp').value = ''; $('p-rep').value = '1'; $('p-est').checked = false; $('p-usd').checked = false; $('p-usd-monto').value = ''; actualizarUsdPen(); $('p-cat').value = ''; $('p-cat')._nuevoInput.value = ''; $('p-cat')._nuevoInput.hidden = true; $('p-cta').value = ''; $('p-deb').checked = false; diasTocados = false;
       document.querySelectorAll('input[name=dia]').forEach(function (c) { c.checked = false; });
       actualizarPreviewSerie();
       $('det-nuevo').open = false;
@@ -4053,7 +4212,7 @@
     const b = $('btn-sup'), t = b.textContent;
     b.disabled = true; b.textContent = 'Guardando...';
     const d = { infl: Number($('sup-infl').value || 0), cada: Number($('sup-cada').value), mes: $('sup-mes').value || '',
-                modo: $('sup-modo').value, pct: Number($('sup-pct').value || 0) };
+                modo: $('sup-modo').value, pct: Number($('sup-pct').value || 0), tc: Number($('sup-tc').value || 0) };
     try {
       const r = await guardarOp('supuestos_guardar', d);
       estado.supuestos = r && r.supuestos ? r.supuestos : d;
@@ -4083,7 +4242,9 @@
     $(id).addEventListener('input', actualizarPreviewCompra);
     $(id).addEventListener('change', actualizarPreviewCompra);
   });
-  $('p-moneda').addEventListener('change', renderCuentaPrevista);
+  $('p-moneda').addEventListener('change', function () { renderCuentaPrevista(); actualizarUsdPen(); });
+  $('p-usd').addEventListener('change', actualizarUsdPen);
+  document.querySelectorAll('input[name=tipo-pen]').forEach(function (r) { r.addEventListener('change', actualizarUsdPen); });
   $('p-cp').addEventListener('change', function () {
     $('wrap-nueva-cp').hidden = this.value !== '__nueva__';
     if (this.value === '__nueva__') $('p-nueva-cp').focus();
@@ -4111,7 +4272,7 @@
   document.querySelectorAll('input[name=tipo]').forEach(function (r) { r.addEventListener('change', actualizarFormMov); });
   ['cuenta', 'cuenta-destino'].forEach(function (id) { $(id).addEventListener('change', actualizarFormMov); });
   ['monto', 'monto-dest'].forEach(function (id) { $(id).addEventListener('input', actualizarTC); });
-  const APP_VERSION = '11/10/2026 · suscripciones y filtro por tarjeta';
+  const APP_VERSION = '11/10/2026 · compra de dólares y total en pesos';
   $('version').textContent = 'Versión ' + APP_VERSION;
   const esLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || esLocal)) {
