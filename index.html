@@ -400,6 +400,7 @@
   <!-- ============ PENDIENTES ============ -->
   <div id="vista-pen" role="tabpanel" hidden>
     <div class="filtro-cuenta"><label for="fil-pen">Cuenta</label><select id="fil-pen"></select></div>
+    <div class="filtro-cuenta"><label for="fil-pen-tar">Tarjeta</label><select id="fil-pen-tar"></select></div>
     <div class="nota" id="fil-pen-info" hidden style="margin-bottom:12px"></div>
     <div id="resumen-pen" class="monedas"></div>
 
@@ -690,9 +691,17 @@
             <label for="k-mon">Moneda</label>
             <select id="k-mon"><option value="ARS">Pesos (ARS)</option><option value="USD">Dólares (USD)</option></select>
           </div>
-          <div class="campo">
+          <div class="campo" id="campo-cuotas">
             <label for="k-cuotas">Cuotas</label>
             <input type="number" id="k-cuotas" min="1" max="48" value="1">
+          </div>
+          <div class="campo ancho check">
+            <input type="checkbox" id="k-susc">
+            <label for="k-susc">Es una suscripción (se cobra todos los meses)</label>
+          </div>
+          <div class="campo" id="campo-meses" hidden>
+            <label for="k-meses">Cargar los próximos (meses)</label>
+            <input type="number" id="k-meses" min="2" max="36" value="12">
           </div>
           <div class="campo">
             <label for="k-fecha">Fecha de la compra</label>
@@ -710,7 +719,7 @@
             <label for="k-res">Primera cuota en el resumen que vence</label>
             <select id="k-res"></select>
           </div>
-          <div class="campo ancho">
+          <div class="campo ancho" id="campo-vcuota">
             <label for="k-vcuota">Valor de cada cuota (solo si la financiación tiene interés)</label>
             <input type="text" id="k-vcuota" inputmode="decimal" placeholder="Vacío = monto total dividido las cuotas">
           </div>
@@ -722,6 +731,7 @@
 
     <section>
       <h2>Resúmenes por pagar</h2>
+      <div class="filtro-cuenta"><label for="fil-tar">Tarjeta</label><select id="fil-tar"></select></div>
       <div class="lista" id="lista-res"></div>
     </section>
 
@@ -816,7 +826,7 @@
   const abiertoCC = {};
   const HORIZONTE_DIAS = 30;
   const MOV_PAGINA = 25;
-  let filtroMov = '', filtroPen = '', movVisibles = MOV_PAGINA;   // filtros por cuenta: se reinician al abrir la app
+  let filtroMov = '', filtroPen = '', filtroTar = '', movVisibles = MOV_PAGINA;   // filtros por cuenta: se reinician al abrir la app
   // Meses que se proyectan (Resumen y Proyección). Se recuerda en este navegador.
   let mesesProyeccion = (function () {
     try { const v = Number(localStorage.getItem('finanzas_meses')); return [3, 6, 12, 18, 24].indexOf(v) >= 0 ? v : 6; } catch (e) { return 6; }
@@ -1120,6 +1130,19 @@
   function renderFiltrosCuenta() {
     filtroMov = llenarFiltroCuentas($('fil-mov'), filtroMov, false);
     filtroPen = llenarFiltroCuentas($('fil-pen'), filtroPen, true);
+    // Filtro por tarjeta (compartido entre Tarjetas y Pendientes)
+    ['fil-tar', 'fil-pen-tar'].forEach(function (id) {
+      const sel = $(id);
+      sel.innerHTML = '';
+      const todas = el('option', '', 'Todas las tarjetas'); todas.value = ''; sel.appendChild(todas);
+      estado.tarjetas.slice().sort(function (a, b) { return String(a.nombre).localeCompare(String(b.nombre)); }).forEach(function (t) {
+        const o = el('option', '', t.nombre + (t.activa === 'NO' ? ' · archivada' : '')); o.value = t.id; sel.appendChild(o);
+      });
+      sel.value = Array.prototype.some.call(sel.options, function (o) { return o.value === filtroTar; }) ? filtroTar : '';
+    });
+    if (!Array.prototype.some.call($('fil-tar').options, function (o) { return o.value === filtroTar; })) filtroTar = '';
+    // Sin tarjetas cargadas no tiene sentido mostrarlo en Pendientes
+    $('fil-pen-tar').parentNode.hidden = !estado.tarjetas.length;
   }
 
   // Si cargás algo en otra cuenta mientras filtrás, el mensaje aclara por qué no lo ves en la lista
@@ -1532,6 +1555,7 @@
 
   // Filtro de la pestaña Pendientes: se filtra por la cuenta prevista de pago. Los resúmenes de tarjeta no tienen.
   function pasaFiltroPen(x) {
+    if (filtroTar && x.tarjeta !== filtroTar) return false;
     if (!filtroPen) return true;
     const cta = x.esResumen ? '' : (x.cuenta_prevista || '');
     return filtroPen === '__sin__' ? !cta : cta === filtroPen;
@@ -1539,6 +1563,11 @@
 
   function renderInfoFiltroPen() {
     const info = $('fil-pen-info');
+    if (filtroTar) {
+      info.textContent = 'Mostrando solo los resúmenes de ' + nombreTarjeta(filtroTar) + '.' + (filtroPen ? ' El filtro de cuenta también está activo.' : '');
+      info.hidden = false;
+      return;
+    }
     if (!filtroPen) { info.hidden = true; return; }
     if (filtroPen === '__sin__') {
       info.textContent = 'Mostrando los pendientes sin cuenta prevista, incluidos los resúmenes de tarjeta.';
@@ -2611,6 +2640,7 @@
       const c = cuentaPorId(d.cuenta);
       return 'Pago · ' + (p ? p.descripcion : 'pendiente') + ' ' + fmt(d.monto, c ? c.moneda : 'ARS');
     }
+    if (action === 'suscribir_tarjeta') return 'Suscripción ' + d.descripcion + ' ' + fmt(d.monto, d.moneda) + ' x ' + d.meses + ' meses';
     if (action === 'pagar_resumen') return 'Pago de resumen ' + fmt(d.monto, d.moneda);
     if (action === 'supuestos_guardar') return 'Supuestos de inflación';
     return action;
@@ -3613,9 +3643,9 @@
     // Resúmenes por pagar: los cercanos a la vista, el resto plegado
     const lr = $('lista-res');
     lr.innerHTML = '';
-    const ordenados = grupos.sort(porVencimiento);
+    const ordenados = grupos.filter(function (g) { return !filtroTar || g.tarjeta === filtroTar; }).sort(porVencimiento);
     if (!ordenados.length) {
-      lr.appendChild(el('div', 'vacio', 'No hay resúmenes por pagar. Cuando cargues una compra, sus cuotas aparecen acá agrupadas por resumen.'));
+      lr.appendChild(el('div', 'vacio', filtroTar ? 'No hay resúmenes por pagar de esta tarjeta.' : 'No hay resúmenes por pagar. Cuando cargues una compra, sus cuotas aparecen acá agrupadas por resumen.'));
     } else {
       const cerca = ordenados.filter(function (g) { return esExigible(g.vencimiento); });
       const lejos = ordenados.filter(function (g) { return !esExigible(g.vencimiento); });
@@ -3636,7 +3666,7 @@
     lc.innerHTML = '';
     const nombreCat = {};
     estado.categorias.forEach(function (c) { nombreCat[c.id] = c.nombre; });
-    const compras = estado.compras.slice().sort(function (a, b) {
+    const compras = estado.compras.filter(function (c) { return !filtroTar || c.tarjeta === filtroTar; }).sort(function (a, b) {
       if (a.fecha !== b.fecha) return a.fecha < b.fecha ? 1 : -1;
       return b._fila - a._fila;
     }).slice(0, 15);
@@ -3732,8 +3762,17 @@
   function actualizarPreviewCompra() {
     const prev = $('k-prev');
     const t = tarjetaSel();
-    const n = Math.floor(Number($('k-cuotas').value));
     const primer = $('k-res').value;
+    if ($('k-susc').checked) {
+      const meses = Math.floor(Number($('k-meses').value));
+      if (!t || !primer || !(meses >= 2)) { prev.hidden = true; return; }
+      const y1 = Number(primer.slice(0, 4)), m1 = Number(primer.slice(5, 7)), mU = mesMas(y1, m1, meses - 1);
+      prev.textContent = 'Se cargan ' + meses + ' meses, uno en cada resumen: del que vence el ' + fmtFecha(fechaResumen(t, $('k-mon').value, y1, m1)) +
+        ' al que vence el ' + fmtFecha(fechaResumen(t, $('k-mon').value, mU.y, mU.m)) + '. Cada mes cuenta como gasto en su fecha.';
+      prev.hidden = false;
+      return;
+    }
+    const n = Math.floor(Number($('k-cuotas').value));
     if (!t || !primer || !(n >= 1)) { prev.hidden = true; return; }
     const mon = $('k-mon').value;
     const y0 = Number(primer.slice(0, 4)), m0 = Number(primer.slice(5, 7));
@@ -3748,10 +3787,40 @@
     prev.hidden = false;
   }
 
+  function alternarSuscripcion() {
+    const sus = $('k-susc').checked;
+    $('campo-meses').hidden = !sus;
+    $('campo-cuotas').hidden = sus;
+    $('campo-vcuota').hidden = sus;
+    actualizarPreviewCompra();
+  }
+
   async function guardarCompra(ev) {
     ev.preventDefault();
     const monto = parseMonto($('k-monto').value);
     if (!(monto > 0)) { toast('Ingresá un monto mayor a 0'); $('k-monto').focus(); return; }
+    if ($('k-susc').checked) {
+      const meses = Math.floor(Number($('k-meses').value));
+      if (!(meses >= 2 && meses <= 36)) { toast('Los meses deben ser entre 2 y 36'); $('k-meses').focus(); return; }
+      const bs = $('btn-guardar-compra');
+      bs.disabled = true; bs.textContent = 'Guardando...';
+      try {
+        const r = await guardarOp('suscribir_tarjeta', {
+          tarjeta: $('k-tar').value, fecha: $('k-fecha').value, descripcion: $('k-desc').value.trim(),
+          monto: monto, moneda: $('k-mon').value, meses: meses,
+          categoria: await resolverCategoria($('k-cat'), 'gasto'), primer_mes: $('k-res').value
+        });
+        $('k-desc').value = ''; $('k-monto').value = '';
+        if (r.encolado) toast(msgEncolado(r));
+        else { toast('Suscripción cargada: ' + meses + ' meses'); await cargar(); }
+        $('k-desc').focus();
+      } catch (err) {
+        toast('No se guardó: ' + err.message);
+      } finally {
+        bs.textContent = 'Guardar compra'; bs.disabled = false;
+      }
+      return;
+    }
     const cuotas = Math.floor(Number($('k-cuotas').value));
     if (!(cuotas >= 1 && cuotas <= 48)) { toast('Las cuotas deben ser entre 1 y 48'); $('k-cuotas').focus(); return; }
     let valorCuota = '';
@@ -3944,6 +4013,13 @@
   $('cal-sig').addEventListener('click', function () { mesCal = sumarMeses((mesCal || hoy().slice(0, 7)) + '-01', 1).slice(0, 7); renderCalendarioPen(); });
   $('cal-hoy').addEventListener('click', function () { mesCal = hoy().slice(0, 7); diaCal = hoy(); renderCalendarioPen(); });
   $('btn-mov-mas').addEventListener('click', function () { movVisibles += MOV_PAGINA; renderMovimientos(); });
+  function cambiarFiltroTar() {
+    filtroTar = this.value;
+    $('fil-tar').value = $('fil-pen-tar').value = filtroTar;
+    renderTarjetas(); renderResumenPen(); renderListaPen(); renderCalendarioPen();
+  }
+  $('fil-tar').addEventListener('change', cambiarFiltroTar);
+  $('fil-pen-tar').addEventListener('change', cambiarFiltroTar);
   $('fil-pen').addEventListener('change', function () { filtroPen = this.value; renderResumenPen(); renderListaPen(); renderCalendarioPen(); });
   $('btn-cola-enviar').addEventListener('click', function () { reintentoManual = true; cargar(); });
   window.addEventListener('online', function () { cargar(); });
@@ -4001,6 +4077,8 @@
   $('form-compra').addEventListener('submit', guardarCompra);
   $('form-tar').addEventListener('submit', guardarTarjeta);
   ['k-tar', 'k-fecha', 'k-mon'].forEach(function (id) { $(id).addEventListener('change', renderOpcionesResumen); });
+  $('k-susc').addEventListener('change', alternarSuscripcion);
+  $('k-meses').addEventListener('input', actualizarPreviewCompra);
   ['k-tar', 'k-fecha', 'k-monto', 'k-mon', 'k-cuotas', 'k-res', 'k-vcuota'].forEach(function (id) {
     $(id).addEventListener('input', actualizarPreviewCompra);
     $(id).addEventListener('change', actualizarPreviewCompra);
@@ -4033,7 +4111,7 @@
   document.querySelectorAll('input[name=tipo]').forEach(function (r) { r.addEventListener('change', actualizarFormMov); });
   ['cuenta', 'cuenta-destino'].forEach(function (id) { $(id).addEventListener('change', actualizarFormMov); });
   ['monto', 'monto-dest'].forEach(function (id) { $(id).addEventListener('input', actualizarTC); });
-  const APP_VERSION = '11/10/2026 · categorías nuevas y cambio de contraparte';
+  const APP_VERSION = '11/10/2026 · suscripciones y filtro por tarjeta';
   $('version').textContent = 'Versión ' + APP_VERSION;
   const esLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || esLocal)) {
