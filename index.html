@@ -593,7 +593,12 @@
     <div id="proyeccion" class="monedas"></div>
     <p class="nota" id="nota-infl"></p>
     <p class="nota">Incluye tus pendientes, los resúmenes de tarjeta y lo que falta gastar de cada presupuesto, en el período elegido arriba. Para sueldo u otros ingresos fijos, cargalos como "A cobrar" repetidos por mes. Los meses con ~ incluyen montos estimados.</p>
-  </div>
+    <section>
+      <h2>Gastos proyectados por categoría</h2>
+      <p class="nota">Lo que tenés previsto gastar en el período elegido arriba. Tocá una categoría para ver mes a mes y marcarla como fija o variable.</p>
+      <div id="gastos-proy"></div>
+    </section>
+</div>
 
   <!-- ============ CONTRAPARTES ============ -->
   <div id="vista-cp" role="tabpanel" hidden>
@@ -2423,6 +2428,115 @@
     return r;
   }
 
+  // ================= GASTOS PROYECTADOS POR CATEGORÍA =================
+  function catPorId(id) { return estado.categorias.filter(function (c) { return c.id === id; })[0]; }
+  // Fija = comprometida (alquiler, cuotas, suscripciones). Variable = la podés mover vos. Sin marca: variable si tiene presupuesto.
+  function esCategoriaFija(id) {
+    const c = catPorId(id);
+    if (c && c.flex === 'fijo') return true;
+    if (c && c.flex === 'variable') return false;
+    if (!id) return true;
+    return !presupuestosActivos().some(function (pr) { return pr.categoria === id; });
+  }
+  function proyectadoPorCategoria(mon) {
+    const hoyIso = hoy();
+    const y0 = Number(hoyIso.slice(0, 4)), m0 = Number(hoyIso.slice(5, 7));
+    const meses = [];
+    for (let i = 0; i < mesesProyeccion; i++) { const t = (m0 - 1) + i; meses.push({ y: y0 + Math.floor(t / 12), m: (t % 12) + 1 }); }
+    const cats = {};
+    function sumar(cid, idx, monto) {
+      const c = cats[cid || ''] = cats[cid || ''] || { total: 0, porMes: meses.map(function () { return 0; }) };
+      c.porMes[idx] += monto; c.total += monto;
+    }
+    abiertos().forEach(function (p) {
+      if (p.moneda !== mon || p.tipo !== 'a_pagar' || p.dest_cuenta || !p.vencimiento || p.vencimiento < hoyIso) return;
+      const idx = (Number(p.vencimiento.slice(0, 4)) - y0) * 12 + (Number(p.vencimiento.slice(5, 7)) - m0);
+      if (idx < 0 || idx >= meses.length) return;
+      sumar(p.categoria, idx, montoProyectado(p, estado.saldoPen[p.id]));
+    });
+    presupuestosActivos(mon).forEach(function (pre) {
+      meses.forEach(function (mm, idx) {
+        let rest = detallePresupuesto(pre, mm.y, mm.m).restante;
+        if (mon === 'ARS') rest *= factorGastoMes(mm.y + '-' + ('0' + mm.m).slice(-2));
+        if (rest > 0.001) sumar(pre.categoria, idx, rest);
+      });
+    });
+    return { meses: meses, cats: cats };
+  }
+  const gProyAbiertos = {};
+  async function marcarCategoria(cid, flex) {
+    try { await api('editar_categoria', { id: cid, flex: flex }); toast('Categoría actualizada'); await cargar(); }
+    catch (err) { toast('No se pudo: ' + err.message); }
+  }
+  function renderGastosProy() {
+    const cont = $('gastos-proy');
+    cont.innerHTML = '';
+    const fm = function (v, mon) { return mon === 'USD' ? fmt(v, mon) : fmt0(v, mon); };
+    // Promedio real mensual (últimos 90 días) para comparar
+    const t0 = new Date(); t0.setDate(t0.getDate() - 89);
+    const real = gastosEntre(t0.toLocaleDateString('sv-SE'), hoy());
+    let hay = false;
+    monedasProyeccion().forEach(function (mon) {
+      const pr = proyectadoPorCategoria(mon);
+      const ids = Object.keys(pr.cats).sort(function (a, b) { return pr.cats[b].total - pr.cats[a].total; });
+      if (!ids.length) return;
+      hay = true;
+      let fijo = 0, variable = 0;
+      ids.forEach(function (cid) { if (esCategoriaFija(cid)) fijo += pr.cats[cid].total; else variable += pr.cats[cid].total; });
+      const total = fijo + variable;
+      const bloque = el('div', mon === 'USD' ? 'moneda-usd' : '');
+      bloque.appendChild(el('div', 'g-tot', nombreMoneda(mon) + ' · previsto ' + fm(total, mon) + ' en ' + mesesProyeccion + ' meses'));
+      const resumen = el('div', 'g-fila'); resumen.style.cursor = 'default';
+      const c1 = el('div', 'g-cab'); c1.appendChild(el('span', 'g-nom', 'Fijo (comprometido)')); c1.appendChild(el('span', 'g-monto', fm(fijo, mon) + ' · ' + Math.round(fijo / total * 100) + '%'));
+      const c2 = el('div', 'g-cab'); c2.appendChild(el('span', 'g-nom', 'Variable (ajustable)')); c2.appendChild(el('span', 'g-monto', fm(variable, mon) + ' · ' + Math.round(variable / total * 100) + '%'));
+      const barra = el('div', 'g-barra'); const bi = document.createElement('i'); bi.style.width = Math.round(fijo / total * 100) + '%'; bi.style.background = 'var(--suave)'; barra.appendChild(bi);
+      resumen.appendChild(c1); resumen.appendChild(barra); resumen.appendChild(c2);
+      bloque.appendChild(resumen);
+      const maximo = pr.cats[ids[0]].total;
+      ids.forEach(function (cid) {
+        const c = pr.cats[cid], fija = esCategoriaFija(cid), cat = catPorId(cid);
+        const clave = mon + '|' + cid;
+        const fila = el('div', 'g-fila');
+        const cab = el('div', 'g-cab');
+        cab.appendChild(el('span', 'g-nom', (cid ? nombreCategoria(cid) : 'Sin categoría') + ' · ' + (fija ? 'fija' : 'variable')));
+        cab.appendChild(el('span', 'g-monto', fm(c.total, mon)));
+        fila.appendChild(cab);
+        const b = el('div', 'g-barra'); const i = document.createElement('i');
+        i.style.width = Math.max(2, Math.round(c.total / maximo * 100)) + '%'; if (fija) i.style.background = 'var(--suave)'; b.appendChild(i); fila.appendChild(b);
+        const prom = c.total / mesesProyeccion;
+        const rr = real[mon] && real[mon].cats[cid] ? real[mon].cats[cid].total / 3 : 0;
+        fila.appendChild(el('div', 'g-sub', 'Previsto ~' + fm(prom, mon) + ' por mes' + (rr ? ' · hoy gastás ~' + fm(rr, mon) + ' por mes' : '')));
+        const det = el('div', 'g-det'); det.hidden = !gProyAbiertos[clave];
+        pr.meses.forEach(function (mm, idx) {
+          if (!(c.porMes[idx] > 0.001)) return;
+          const f = el('div', '');
+          f.appendChild(el('span', 'g-d', new Date(mm.y, mm.m - 1, 1).toLocaleDateString('es-AR', { month: 'long', year: 'numeric' })));
+          f.appendChild(el('span', '', fm(c.porMes[idx], mon)));
+          det.appendChild(f);
+        });
+        if (cid) {
+          const fl = el('div', ''); fl.style.marginTop = '8px'; fl.style.gap = '6px';
+          [['fijo', 'Fija'], ['variable', 'Variable'], ['', 'Automática']].forEach(function (op) {
+            const activo = (cat && cat.flex || '') === op[0];
+            const bt = el('button', activo ? 'principal' : 'anular', op[1]); bt.type = 'button';
+            bt.addEventListener('click', function (ev) { ev.stopPropagation(); if (!activo) marcarCategoria(cid, op[0]); });
+            fl.appendChild(bt);
+          });
+          det.appendChild(fl);
+          det.appendChild(el('div', 'g-d', 'Automática: es variable si tiene presupuesto, fija si no.'));
+        } else {
+          det.appendChild(el('div', 'g-d', 'Ponele categoría a estos pendientes para poder clasificarlos.'));
+        }
+        fila.appendChild(det);
+        fila.addEventListener('click', function () { gProyAbiertos[clave] = !gProyAbiertos[clave]; det.hidden = !gProyAbiertos[clave]; });
+        bloque.appendChild(fila);
+      });
+      cont.appendChild(bloque);
+    });
+    if (!hay) cont.appendChild(el('div', 'vacio', 'Todavía no hay gastos previstos en el período. Cargá pendientes o presupuestos.'));
+    else cont.appendChild(el('p', 'nota', 'No incluye lo vencido ni los pendientes sin fecha. Las cuotas de tarjeta cuentan en el mes en que vence el resumen. Las compras de dólares no se cuentan como gasto.'));
+  }
+
   // ================= GASTOS POR CATEGORÍA =================
   let periodoGastos = 'mes';
   function isoDia(y, m, d) { return y + '-' + ('0' + m).slice(-2) + '-' + ('0' + d).slice(-2); }
@@ -2873,6 +2987,7 @@
     renderProyeccion();
     renderResumen();
     renderGastosCat();
+    renderGastosProy();
     renderCategoriasPen();
     renderCuentaPrevista();
     actualizarUsdPen();
@@ -4320,6 +4435,7 @@
       $('sel-meses-res').value = $('sel-meses-proy').value = String(mesesProyeccion);
       renderResumen();
       renderProyeccion();
+      renderGastosProy();
     });
   });
   $('tab-mov').addEventListener('click', function () { mostrar('mov'); });
@@ -4338,7 +4454,7 @@
       const r = await guardarOp('supuestos_guardar', d);
       estado.supuestos = r && r.supuestos ? r.supuestos : d;
       document.activeElement && document.activeElement.blur();
-      renderSupuestos(); renderProyeccion(); renderResumen();
+      renderSupuestos(); renderProyeccion(); renderResumen(); renderGastosProy();
       toast(r && r.encolado ? 'Guardado en el celular, se envía cuando haya señal' : 'Supuestos guardados');
     } catch (err) { toast('No se pudo: ' + err.message); }
     finally { b.textContent = t; b.disabled = false; }
@@ -4393,7 +4509,7 @@
   document.querySelectorAll('input[name=tipo]').forEach(function (r) { r.addEventListener('change', actualizarFormMov); });
   ['cuenta', 'cuenta-destino'].forEach(function (id) { $(id).addEventListener('change', actualizarFormMov); });
   ['monto', 'monto-dest'].forEach(function (id) { $(id).addEventListener('input', actualizarTC); });
-  const APP_VERSION = '12/10/2026 · gastos por categoría';
+  const APP_VERSION = '12/10/2026 · gastos proyectados por categoría';
   $('version').textContent = 'Versión ' + APP_VERSION;
   const esLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || esLocal)) {
