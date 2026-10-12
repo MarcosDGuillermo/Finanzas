@@ -201,6 +201,19 @@
   .cp-detalle details > summary { margin: 14px 0 6px; }
 
   .res-sub { color: var(--suave); font-size: .875rem; margin: 6px 0 2px; }
+  .g-fila { background: var(--papel); border: 1px solid var(--linea); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; cursor: pointer; }
+  .g-fila .g-cab { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+  .g-fila .g-nom { font-weight: 500; }
+  .g-fila .g-monto { font-weight: 600; white-space: nowrap; }
+  .g-barra { height: 6px; border-radius: 3px; background: #e6ebe8; margin: 6px 0 4px; overflow: hidden; }
+  .g-barra i { display: block; height: 100%; background: var(--gasto); border-radius: 3px; }
+  .moneda-usd .g-barra i { background: var(--dolar); }
+  .g-sub { display: flex; justify-content: space-between; gap: 8px; font-size: .8125rem; color: var(--suave); }
+  .g-sub .sube { color: var(--gasto); } .g-sub .baja { color: var(--ingreso); }
+  .g-det { margin-top: 8px; border-top: 1px solid var(--linea); padding-top: 6px; font-size: .875rem; }
+  .g-det div { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; }
+  .g-det .g-d { color: var(--suave); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .g-tot { font-size: .9375rem; margin: 14px 0 8px; font-weight: 600; }
   .res-titulo { font-size: .9375rem; font-weight: 600; margin: 20px 0 4px; }
   .res-frase { font-size: .875rem; margin: 0 0 4px; }
   .grafico { margin: 8px 0 4px; }
@@ -311,6 +324,11 @@
     <section>
       <h2>Próximos vencimientos</h2>
       <div class="lista" id="res-venc"></div>
+    </section>
+    <section>
+      <h2>¿En qué gastás?</h2>
+      <div class="filtro"><label for="sel-gastos">Período</label> <select id="sel-gastos"><option value="mes">Este mes</option><option value="ant">Mes anterior</option><option value="tres">Últimos 90 días</option></select></div>
+      <div id="gastos-cat"></div>
     </section>
   </div>
 
@@ -2405,6 +2423,107 @@
     return r;
   }
 
+  // ================= GASTOS POR CATEGORÍA =================
+  let periodoGastos = 'mes';
+  function isoDia(y, m, d) { return y + '-' + ('0' + m).slice(-2) + '-' + ('0' + d).slice(-2); }
+  function rangoGastos(per) {
+    const h = hoy(), y = Number(h.slice(0, 4)), m = Number(h.slice(5, 7)), d = Number(h.slice(8, 10));
+    const pm = m === 1 ? { y: y - 1, m: 12 } : { y: y, m: m - 1 };
+    const ppm = pm.m === 1 ? { y: pm.y - 1, m: 12 } : { y: pm.y, m: pm.m - 1 };
+    if (per === 'ant') {
+      return { desde: isoDia(pm.y, pm.m, 1), hasta: isoDia(pm.y, pm.m, diasDelMes(pm.y, pm.m)),
+               previo: { desde: isoDia(ppm.y, ppm.m, 1), hasta: isoDia(ppm.y, ppm.m, diasDelMes(ppm.y, ppm.m)) }, nota: 'vs mes anterior a ese' };
+    }
+    if (per === 'tres') {
+      const t = new Date(); t.setDate(t.getDate() - 89);
+      return { desde: t.toLocaleDateString('sv-SE'), hasta: h, previo: null, nota: '' };
+    }
+    return { desde: isoDia(y, m, 1), hasta: h,
+             previo: { desde: isoDia(pm.y, pm.m, 1), hasta: isoDia(pm.y, pm.m, Math.min(d, diasDelMes(pm.y, pm.m))) }, nota: 'vs mismo tramo del mes anterior' };
+  }
+  // Gastos reales: movimientos de gasto + compras con tarjeta (cuentan el día de la compra). Los pagos de resumen no cuentan.
+  function gastosEntre(desde, hasta) {
+    const r = {};
+    function sumar(mon, cat, monto, item) {
+      const g = r[mon] = r[mon] || { total: 0, cats: {} };
+      const c = g.cats[cat || ''] = g.cats[cat || ''] || { total: 0, items: [] };
+      c.total += monto; g.total += monto; c.items.push(item);
+    }
+    estado.movimientos.forEach(function (m) {
+      if (m.tipo !== 'gasto') return;
+      const f = String(m.fecha);
+      if (f < desde || f > hasta) return;
+      sumar(m.moneda, m.categoria, Number(m.monto), { fecha: f, desc: m.descripcion || 'Gasto', monto: Number(m.monto) });
+    });
+    estado.compras.forEach(function (c) {
+      const f = String(c.fecha);
+      if (f < desde || f > hasta) return;
+      sumar(c.moneda, c.categoria, Number(c.monto), { fecha: f, desc: (c.descripcion || 'Compra') + ' · ' + nombreTarjeta(c.tarjeta), monto: Number(c.monto) });
+    });
+    return r;
+  }
+  const gastosAbiertos = {};
+  function renderGastosCat() {
+    const fm = function (v, mon) { return mon === 'USD' ? fmt(v, mon) : fmt0(v, mon); };
+    const cont = $('gastos-cat');
+    cont.innerHTML = '';
+    const rg = rangoGastos(periodoGastos);
+    const act = gastosEntre(rg.desde, rg.hasta);
+    // Con 90 días de movimientos cargados, solo se compara si el tramo anterior entra en lo que la app tiene
+    const t0 = new Date(); t0.setDate(t0.getDate() - 89);
+    const ventana = t0.toLocaleDateString('sv-SE');
+    const prev = rg.previo && rg.previo.desde >= ventana ? gastosEntre(rg.previo.desde, rg.previo.hasta) : null;
+    cont.appendChild(el('p', 'nota', fmtFecha(rg.desde) + ' al ' + fmtFecha(rg.hasta) + '. Incluye compras con tarjeta el día que las hiciste; los pagos de resumen no se cuentan de nuevo.'));
+    const monedas = ordenMonedas(Object.keys(act));
+    if (!monedas.length) { cont.appendChild(el('div', 'vacio', 'No hay gastos cargados en este período.')); return; }
+    monedas.forEach(function (mon) {
+      const g = act[mon];
+      const bloque = el('div', mon === 'USD' ? 'moneda-usd' : '');
+      bloque.appendChild(el('div', 'g-tot', nombreMoneda(mon) + ' · gastaste ' + fm(g.total, mon)));
+      const cats = Object.keys(g.cats).sort(function (a, b) { return g.cats[b].total - g.cats[a].total; });
+      const maximo = g.cats[cats[0]].total;
+      cats.forEach(function (cid) {
+        const c = g.cats[cid];
+        const clave = periodoGastos + '|' + mon + '|' + cid;
+        const fila = el('div', 'g-fila');
+        const cab = el('div', 'g-cab');
+        cab.appendChild(el('span', 'g-nom', cid ? nombreCategoria(cid) : 'Sin categoría'));
+        cab.appendChild(el('span', 'g-monto', fm(c.total, mon)));
+        fila.appendChild(cab);
+        const barra = el('div', 'g-barra'); const i = document.createElement('i');
+        i.style.width = Math.max(2, Math.round(c.total / maximo * 100)) + '%'; barra.appendChild(i); fila.appendChild(barra);
+        const sub = el('div', 'g-sub');
+        sub.appendChild(el('span', '', (Math.round(c.total / g.total * 1000) / 10) + '% del total · ' + c.items.length + (c.items.length === 1 ? ' gasto' : ' gastos')));
+        if (prev) {
+          const pc = prev[mon] && prev[mon].cats[cid] ? prev[mon].cats[cid].total : 0;
+          let txt = '', cls = '';
+          if (!pc) { txt = 'nuevo'; cls = 'sube'; }
+          else {
+            const dif = Math.round((c.total - pc) / pc * 100);
+            if (dif > 0) { txt = '▲ ' + dif + '%'; cls = 'sube'; } else if (dif < 0) { txt = '▼ ' + (-dif) + '%'; cls = 'baja'; } else txt = '= igual';
+          }
+          sub.appendChild(el('span', cls, txt));
+        }
+        fila.appendChild(sub);
+        const det = el('div', 'g-det');
+        det.hidden = !gastosAbiertos[clave];
+        c.items.slice().sort(function (a, b) { return b.monto - a.monto; }).slice(0, 10).forEach(function (it) {
+          const f = el('div', '');
+          f.appendChild(el('span', 'g-d', fmtFecha(it.fecha).slice(0, 5) + ' · ' + it.desc));
+          f.appendChild(el('span', '', fm(it.monto, mon)));
+          det.appendChild(f);
+        });
+        if (c.items.length > 10) det.appendChild(el('div', 'g-d', 'y ' + (c.items.length - 10) + ' más de menor monto'));
+        fila.appendChild(det);
+        fila.addEventListener('click', function () { gastosAbiertos[clave] = !gastosAbiertos[clave]; det.hidden = !gastosAbiertos[clave]; });
+        bloque.appendChild(fila);
+      });
+      cont.appendChild(bloque);
+    });
+    if (prev) cont.appendChild(el('p', 'nota', 'Las flechas comparan ' + rg.nota + '. Rojo: gastaste más; verde: gastaste menos.'));
+    if (periodoGastos === 'ant' && !prev) cont.appendChild(el('p', 'nota', 'No hay comparación: la app guarda los movimientos de los últimos 90 días.'));
+  }
+
   function renderResumen() {
     const cont = $('res-monedas');
     cont.innerHTML = '';
@@ -2753,6 +2872,7 @@
     renderSupuestos();
     renderProyeccion();
     renderResumen();
+    renderGastosCat();
     renderCategoriasPen();
     renderCuentaPrevista();
     actualizarUsdPen();
@@ -4206,6 +4326,7 @@
   document.querySelectorAll('input[name=tipo-pen]').forEach(function (r) { r.addEventListener('change', renderCategoriasPen); });
   $('tab-pen').addEventListener('click', function () { mostrar('pen'); });
   $('tab-proy').addEventListener('click', function () { mostrar('proy'); });
+  $('sel-gastos').addEventListener('change', function () { periodoGastos = this.value; renderGastosCat(); });
   $('sup-modo').addEventListener('change', function () { $('campo-sup-pct').hidden = this.value !== 'fijo'; });
   $('form-sup').addEventListener('submit', async function (ev) {
     ev.preventDefault();
@@ -4272,7 +4393,7 @@
   document.querySelectorAll('input[name=tipo]').forEach(function (r) { r.addEventListener('change', actualizarFormMov); });
   ['cuenta', 'cuenta-destino'].forEach(function (id) { $(id).addEventListener('change', actualizarFormMov); });
   ['monto', 'monto-dest'].forEach(function (id) { $(id).addEventListener('input', actualizarTC); });
-  const APP_VERSION = '11/10/2026 · compra de dólares y total en pesos';
+  const APP_VERSION = '12/10/2026 · gastos por categoría';
   $('version').textContent = 'Versión ' + APP_VERSION;
   const esLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || esLocal)) {
