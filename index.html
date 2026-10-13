@@ -360,6 +360,11 @@
             <label for="cuenta" id="lbl-cuenta">Cuenta</label>
             <select id="cuenta" required></select>
           </div>
+          <div class="campo" id="campo-cp-mov">
+            <label for="m-cp">Contraparte (opcional)</label>
+            <select id="m-cp"></select>
+            <input type="text" id="m-nueva-cp" maxlength="80" placeholder="Nombre de la nueva contraparte" hidden style="margin-top:8px">
+          </div>
           <div class="campo" id="campo-categoria">
             <label for="categoria">Categoría</label>
             <select id="categoria"></select>
@@ -590,6 +595,11 @@
         <p class="nota" id="sup-ayuda"></p>
       </form>
     </details>
+    <section id="sec-falta">
+      <h2>¿Dónde falta plata?</h2>
+      <p class="nota">Cuenta por cuenta, con tus pendientes, resúmenes y presupuestos del período elegido. Te sugiero qué mover entre cuentas y cuánto rescatar de tu fondo extra (el que está fuera de este flujo). Lo que no tiene "cuenta prevista" se descuenta de la cuenta que elijas acá.</p>
+      <div id="falta"></div>
+    </section>
     <div id="proyeccion" class="monedas"></div>
     <p class="nota" id="nota-infl"></p>
     <p class="nota">Incluye tus pendientes, los resúmenes de tarjeta y lo que falta gastar de cada presupuesto, en el período elegido arriba. Para sueldo u otros ingresos fijos, cargalos como "A cobrar" repetidos por mes. Los meses con ~ incluyen montos estimados.</p>
@@ -1075,6 +1085,7 @@
     const transf = tipoMov() === 'transf';
     const distintas = transf && monedasDistintas();
     $('campo-categoria').hidden = transf;
+    $('campo-cp-mov').hidden = transf;
     $('campo-destino').hidden = !transf;
     $('campo-monto-dest').hidden = !distintas;
     $('lbl-cuenta').textContent = transf ? 'Desde la cuenta' : 'Cuenta';
@@ -1215,6 +1226,7 @@
 
     const partes = [fmtFecha(m.fecha), ctx.nombreCuenta[m.cuenta] || m.cuenta];
     if (m.categoria && ctx.nombreCat[m.categoria]) partes.push(ctx.nombreCat[m.categoria]);
+    if (m.contraparte) { const cpm = estado.contrapartes.filter(function (c) { return c.id === m.contraparte; })[0]; if (cpm) partes.push(cpm.nombre); }
     if (transf && Number(m.tc) && Number(m.tc) !== 1) partes.push('TC ' + fmt(Number(m.tc), 'ARS'));
     fila.appendChild(el('div', 'meta', partes.join(' · ')));
     const acc = el('div', 'acc');
@@ -2046,7 +2058,30 @@
     fMonto.input.focus();
   }
 
+  function renderContrapartesMov() {
+    const sel = $('m-cp');
+    const previo = sel.value;
+    sel.innerHTML = '';
+    const sin = el('option', '', 'Sin contraparte'); sin.value = ''; sel.appendChild(sin);
+    estado.contrapartes.filter(function (c) { return c.activa !== 'NO'; })
+      .sort(function (a, b) { return String(a.nombre).localeCompare(String(b.nombre)); })
+      .forEach(function (c) { const o = el('option', '', c.nombre); o.value = c.id; sel.appendChild(o); });
+    const nueva = el('option', '', '+ Nueva contraparte...'); nueva.value = NUEVA; sel.appendChild(nueva);
+    if (previo && Array.prototype.some.call(sel.options, function (o) { return o.value === previo; })) sel.value = previo;
+    $('m-nueva-cp').hidden = sel.value !== NUEVA;
+  }
+  async function resolverContraparteMov(tipo) {
+    const sel = $('m-cp');
+    if (sel.value !== NUEVA) return sel.value;
+    const nombre = $('m-nueva-cp').value.trim();
+    if (!nombre) throw new Error('Escribí el nombre de la contraparte');
+    const ex = estado.contrapartes.filter(function (c) { return String(c.nombre).trim().toLowerCase() === nombre.toLowerCase(); })[0];
+    if (ex) return ex.id;
+    return (await api('crear', { hoja: 'contrapartes', registro: { nombre: nombre, tipo: tipo === 'gasto' ? 'proveedor' : 'cliente', activa: 'SI' } })).id;
+  }
+
   function renderContrapartes() {
+    renderContrapartesMov();
     const sel = $('p-cp');
     const previo = sel.value;
     sel.innerHTML = '';
@@ -2733,6 +2768,166 @@
     $('sup-ayuda').textContent = 'Se aplica solo en pesos. Afecta a los gastos marcados como estimados, a los presupuestos y a los cobros marcados como estimados o con categoría sueldo/salario. El ajuste del mes actual se considera ya incluido en el sueldo que cargaste.';
   }
 
+  // ================= ¿DÓNDE FALTA PLATA? =================
+  function ctaDefGuardadas() { try { return JSON.parse(localStorage.getItem('finanzas_cta_def') || '{}') || {}; } catch (e) { return {}; } }
+  function ctaDefecto(mon) {
+    const lista = estado.cuentas.filter(function (c) { return c.moneda === mon; });
+    if (!lista.length) return null;
+    const g = ctaDefGuardadas()[mon];
+    if (g && lista.some(function (c) { return c.id === g; })) return g;
+    return lista.slice().sort(function (a, b) { return b.saldo - a.saldo; })[0].id;
+  }
+  function nombreMesLargo(y, m) { return new Date(y, m - 1, 1).toLocaleDateString('es-AR', { month: 'long', year: 'numeric' }); }
+
+  // Proyección por cuenta para una moneda. Devuelve { cuentas:[{cuenta, pasos:[saldo...], min, minEt, final}], etiquetas:[...] }
+  function proyeccionPorCuenta(mon) {
+    const hoyIso = hoy();
+    const y0 = Number(hoyIso.slice(0, 4)), m0 = Number(hoyIso.slice(5, 7));
+    const cuentas = estado.cuentas.filter(function (c) { return c.moneda === mon; });
+    if (!cuentas.length) return null;
+    const def = ctaDefecto(mon);
+    const N = mesesProyeccion;
+    const mov = {};   // cuenta -> array de N+1 (0 = vencidos/ahora, 1..N meses)
+    cuentas.forEach(function (c) { mov[c.id] = new Array(N + 1).fill(0); });
+    function aplicar(cid, idx, v) { if (!mov[cid]) cid = def; if (cid && idx >= 0 && idx <= N) mov[cid][idx] += v; }
+    function indice(venc) {
+      if (!venc || venc < hoyIso) return 0;
+      const i = (Number(venc.slice(0, 4)) - y0) * 12 + (Number(venc.slice(5, 7)) - m0);
+      return i < N ? i + 1 : -1;
+    }
+    abiertos().forEach(function (p) {
+      const sp = estado.saldoPen[p.id];
+      if (p.moneda === mon) {
+        if (!p.vencimiento) return;
+        const idx = indice(p.vencimiento);
+        const v = montoProyectado(p, sp) * (p.tipo === 'a_cobrar' ? 1 : -1);
+        const cid = p.cuenta_prevista && mov[p.cuenta_prevista] ? p.cuenta_prevista : def;
+        aplicar(cid, idx, v);
+      } else if (p.dest_cuenta && mov[p.dest_cuenta]) {
+        const idx = indice(p.vencimiento);
+        aplicar(p.dest_cuenta, idx, Number(p.dest_monto) * (Number(p.monto) > 0 ? sp / Number(p.monto) : 1));
+      }
+    });
+    presupuestosActivos(mon).forEach(function (pre) {
+      for (let i = 0; i < N; i++) {
+        const t = (m0 - 1) + i, y = y0 + Math.floor(t / 12), m = (t % 12) + 1;
+        let rest = detallePresupuesto(pre, y, m).restante;
+        if (mon === 'ARS') rest *= factorGastoMes(y + '-' + ('0' + m).slice(-2));
+        if (rest > 0.001) aplicar(def, i + 1, -rest);
+      }
+    });
+    const etiquetas = ['Ahora (con vencidos)'];
+    for (let i = 0; i < N; i++) { const t = (m0 - 1) + i; etiquetas.push(nombreMesLargo(y0 + Math.floor(t / 12), (t % 12) + 1)); }
+    const res = cuentas.map(function (c) {
+      let acum = c.saldo;
+      const pasos = [];
+      let min = c.saldo, minIdx = -1, primerNeg = -1;
+      mov[c.id].forEach(function (v, i) {
+        acum += v; pasos.push(acum);
+        if (acum < min) { min = acum; minIdx = i; }
+        if (acum < -0.5 && primerNeg < 0) primerNeg = i;
+      });
+      return { cuenta: c, pasos: pasos, min: min, minIdx: minIdx, primerNeg: primerNeg, final: acum };
+    });
+    return { cuentas: res, etiquetas: etiquetas, def: def };
+  }
+
+  // Sugerencias: mover desde cuentas con colchón y, lo que falte, rescatar del fondo extra
+  function sugerenciasFalta(pr) {
+    const deficit = pr.cuentas.filter(function (x) { return x.primerNeg >= 0; })
+      .sort(function (a, b) { return a.primerNeg - b.primerNeg; });
+    const holgura = {};
+    pr.cuentas.forEach(function (x) { holgura[x.cuenta.id] = Math.max(0, Math.min(x.cuenta.saldo, x.min)); });
+    const movs = [], fondo = [];
+    deficit.forEach(function (d) {
+      let necesita = -d.min;
+      pr.cuentas.filter(function (x) { return x !== d && x.primerNeg < 0 && holgura[x.cuenta.id] > 0.5; })
+        .sort(function (a, b) { return holgura[b.cuenta.id] - holgura[a.cuenta.id]; })
+        .forEach(function (o) {
+          if (necesita <= 0.5) return;
+          const q = Math.min(necesita, holgura[o.cuenta.id]);
+          holgura[o.cuenta.id] -= q; necesita -= q;
+          movs.push({ de: o.cuenta, a: d.cuenta, monto: q, antes: d.primerNeg });
+        });
+      if (necesita > 0.5) fondo.push({ a: d.cuenta, monto: necesita, antes: d.primerNeg });
+    });
+    return { movs: movs, fondo: fondo, deficit: deficit };
+  }
+
+  function renderFalta() {
+    const cont = $('falta');
+    if (!cont) return;
+    cont.innerHTML = '';
+    const monedas = monedasProyeccion().filter(function (m) { return estado.cuentas.some(function (c) { return c.moneda === m; }); });
+    if (!monedas.length) { cont.appendChild(el('div', 'vacio', 'Cargá cuentas para ver el análisis.')); return; }
+    monedas.forEach(function (mon) {
+      const pr = proyeccionPorCuenta(mon);
+      if (!pr) return;
+      const f = function (v) { return mon === 'USD' ? fmt(v, mon) : fmt0(v, mon); };
+      const caja = el('div', 'tarjeta-falta');
+      caja.style.cssText = 'background:#fff;border-radius:12px;padding:14px 16px;margin:10px 0';
+      caja.appendChild(el('div', 'rotulo', nombreMoneda(mon)));
+
+      if (estado.cuentas.filter(function (c) { return c.moneda === mon; }).length > 1) {
+        const fila = el('div', 'campo'); fila.style.margin = '8px 0';
+        const lb = el('label', '', 'Gastos sin cuenta prevista salen de'); lb.setAttribute('for', 'falta-def-' + mon);
+        const sel = el('select'); sel.id = 'falta-def-' + mon;
+        estado.cuentas.filter(function (c) { return c.moneda === mon; }).forEach(function (c) { const o = el('option', '', c.nombre); o.value = c.id; sel.appendChild(o); });
+        sel.value = pr.def;
+        sel.addEventListener('change', function () {
+          const g = ctaDefGuardadas(); g[mon] = sel.value;
+          try { localStorage.setItem('finanzas_cta_def', JSON.stringify(g)); } catch (e) {}
+          renderFalta();
+        });
+        fila.appendChild(lb); fila.appendChild(sel); caja.appendChild(fila);
+      }
+
+      const sug = sugerenciasFalta(pr);
+      if (!sug.deficit.length) {
+        const ok = el('p', '', 'Con lo cargado, ninguna cuenta queda en rojo en el período. Alcanza.');
+        ok.style.cssText = 'color:var(--ingreso);font-weight:600;margin:8px 0';
+        caja.appendChild(ok);
+      } else {
+        sug.deficit.forEach(function (d) {
+          const p = el('p', 'neg', d.cuenta.nombre + ' queda en rojo desde ' + pr.etiquetas[d.primerNeg] + ' y llega a ' + f(d.min) + '.');
+          p.style.margin = '8px 0'; caja.appendChild(p);
+        });
+        const h = el('div', 'rotulo', 'Qué hacer'); h.style.marginTop = '12px'; caja.appendChild(h);
+        const ul = el('ul'); ul.style.cssText = 'margin:6px 0 0;padding-left:20px;line-height:1.5';
+        sug.movs.forEach(function (m) {
+          ul.appendChild(el('li', '', 'Pasá ' + f(m.monto) + ' de ' + m.de.nombre + ' a ' + m.a.nombre + ' antes de ' + (m.antes === 0 ? 'ahora' : pr.etiquetas[m.antes]) + '.'));
+        });
+        sug.fondo.forEach(function (m) {
+          const li = el('li', '', 'Rescatá ' + f(m.monto) + ' de tu fondo extra hacia ' + m.a.nombre + ' antes de ' + (m.antes === 0 ? 'ahora' : pr.etiquetas[m.antes]) + '.');
+          li.style.fontWeight = '600'; ul.appendChild(li);
+        });
+        caja.appendChild(ul);
+        const tot = sug.fondo.reduce(function (a, m) { return a + m.monto; }, 0);
+        const r = el('p', 'nota', tot > 0.5 ? 'En total necesitás ' + f(tot) + ' de afuera del flujo. Es aproximado: ' + (mon === 'ARS' ? 'incluye la inflación que cargaste en supuestos. ' : '') + 'Sumá un colchón si querés.' : 'Moviendo entre tus cuentas alcanza, no hace falta rescatar nada de afuera.');
+        r.style.marginTop = '8px'; caja.appendChild(r);
+      }
+
+      const det = el('details'); det.style.marginTop = '10px';
+      det.appendChild(el('summary', '', 'Ver cuenta por cuenta, mes a mes'));
+      const wrap = el('div', 'tabla-wrap'); const t = el('table', 'proy');
+      const th = el('tr'); th.appendChild(el('th', '', 'Cuenta'));
+      th.appendChild(el('th', '', 'Hoy')); th.appendChild(el('th', '', 'Mínimo')); th.appendChild(el('th', '', 'Final'));
+      const thead = el('thead'); thead.appendChild(th); t.appendChild(thead);
+      const tb = el('tbody');
+      pr.cuentas.forEach(function (x) {
+        const tr = el('tr');
+        tr.appendChild(el('td', '', x.cuenta.nombre));
+        tr.appendChild(el('td', '', f(x.cuenta.saldo)));
+        const c2 = el('td', x.min < 0 ? 'neg' : '', f(x.min) + (x.minIdx >= 0 ? ' (' + pr.etiquetas[x.minIdx].replace('Ahora (con vencidos)', 'ahora') + ')' : ' (hoy)'));
+        tr.appendChild(c2);
+        tr.appendChild(el('td', x.final < 0 ? 'neg' : '', f(x.final)));
+        tb.appendChild(tr);
+      });
+      t.appendChild(tb); wrap.appendChild(t); det.appendChild(wrap); caja.appendChild(det);
+      cont.appendChild(caja);
+    });
+  }
+
   function renderProyeccion() {
     const cont = $('proyeccion');
     cont.innerHTML = '';
@@ -2985,6 +3180,7 @@
     aplicarVistaPen();
     renderSupuestos();
     renderProyeccion();
+    renderFalta();
     renderResumen();
     renderGastosCat();
     renderGastosProy();
@@ -3255,7 +3451,9 @@
       } else {
         const r = await guardarOp('crear', { hoja: 'movimientos', registro: {
           fecha: $('fecha').value, tipo: tipo, monto: monto, cuenta: $('cuenta').value,
-          categoria: await resolverCategoria($('categoria'), tipo), descripcion: $('descripcion').value.trim() } });
+          categoria: await resolverCategoria($('categoria'), tipo), contraparte: await resolverContraparteMov(tipo),
+          descripcion: $('descripcion').value.trim() } });
+        $('m-cp').value = ''; $('m-nueva-cp').value = ''; $('m-nueva-cp').hidden = true;
         $('categoria')._nuevoInput.value = '';
         encolado = !!r.encolado;
         toast(encolado ? msgEncolado(r) : 'Movimiento guardado' + sufijoFiltro($('cuenta').value));
@@ -4435,6 +4633,7 @@
       $('sel-meses-res').value = $('sel-meses-proy').value = String(mesesProyeccion);
       renderResumen();
       renderProyeccion();
+      renderFalta();
       renderGastosProy();
     });
   });
@@ -4454,7 +4653,7 @@
       const r = await guardarOp('supuestos_guardar', d);
       estado.supuestos = r && r.supuestos ? r.supuestos : d;
       document.activeElement && document.activeElement.blur();
-      renderSupuestos(); renderProyeccion(); renderResumen(); renderGastosProy();
+      renderSupuestos(); renderProyeccion(); renderFalta(); renderResumen(); renderGastosProy();
       toast(r && r.encolado ? 'Guardado en el celular, se envía cuando haya señal' : 'Supuestos guardados');
     } catch (err) { toast('No se pudo: ' + err.message); }
     finally { b.textContent = t; b.disabled = false; }
@@ -4481,6 +4680,7 @@
   });
   $('p-moneda').addEventListener('change', function () { renderCuentaPrevista(); actualizarUsdPen(); });
   $('p-usd').addEventListener('change', actualizarUsdPen);
+  $('m-cp').addEventListener('change', function () { $('m-nueva-cp').hidden = this.value !== NUEVA; if (this.value === NUEVA) $('m-nueva-cp').focus(); });
   document.querySelectorAll('input[name=tipo-pen]').forEach(function (r) { r.addEventListener('change', actualizarUsdPen); });
   $('p-cp').addEventListener('change', function () {
     $('wrap-nueva-cp').hidden = this.value !== '__nueva__';
@@ -4509,7 +4709,7 @@
   document.querySelectorAll('input[name=tipo]').forEach(function (r) { r.addEventListener('change', actualizarFormMov); });
   ['cuenta', 'cuenta-destino'].forEach(function (id) { $(id).addEventListener('change', actualizarFormMov); });
   ['monto', 'monto-dest'].forEach(function (id) { $(id).addEventListener('input', actualizarTC); });
-  const APP_VERSION = '12/10/2026 · gastos proyectados por categoría';
+  const APP_VERSION = '13/10/2026 · contraparte en movimientos y dónde falta plata';
   $('version').textContent = 'Versión ' + APP_VERSION;
   const esLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || esLocal)) {
