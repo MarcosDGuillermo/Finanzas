@@ -597,7 +597,7 @@
     </details>
     <section id="sec-falta">
       <h2>¿Dónde falta plata?</h2>
-      <p class="nota">Cuenta por cuenta, con tus pendientes, resúmenes y presupuestos del período elegido. Te sugiero qué mover entre cuentas y cuánto rescatar de tu fondo extra (el que está fuera de este flujo). Lo que no tiene "cuenta prevista" se descuenta de la cuenta que elijas acá.</p>
+      <p class="nota">Cuenta por cuenta, solo para este mes (con los vencidos): pendientes, resúmenes y lo que falta de los presupuestos. Te sugiero qué mover entre cuentas y cuánto rescatar de tu fondo extra (el que está fuera de este flujo). Lo que no tiene "cuenta prevista" se descuenta de la cuenta que elijas acá.</p>
       <div id="falta"></div>
     </section>
     <div id="proyeccion" class="monedas"></div>
@@ -2781,12 +2781,12 @@
 
   // Proyección por cuenta para una moneda. Devuelve { cuentas:[{cuenta, pasos:[saldo...], min, minEt, final}], etiquetas:[...] }
   function proyeccionPorCuenta(mon) {
+    const N = 1;   // solo el mes en curso (más los vencidos): es lo que se puede accionar ahora
     const hoyIso = hoy();
     const y0 = Number(hoyIso.slice(0, 4)), m0 = Number(hoyIso.slice(5, 7));
     const cuentas = estado.cuentas.filter(function (c) { return c.moneda === mon; });
     if (!cuentas.length) return null;
     const def = ctaDefecto(mon);
-    const N = mesesProyeccion;
     const mov = {};   // cuenta -> array de N+1 (0 = vencidos/ahora, 1..N meses)
     cuentas.forEach(function (c) { mov[c.id] = new Array(N + 1).fill(0); });
     function aplicar(cid, idx, v) { if (!mov[cid]) cid = def; if (cid && idx >= 0 && idx <= N) mov[cid][idx] += v; }
@@ -2884,7 +2884,7 @@
 
       const sug = sugerenciasFalta(pr);
       if (!sug.deficit.length) {
-        const ok = el('p', '', 'Con lo cargado, ninguna cuenta queda en rojo en el período. Alcanza.');
+        const ok = el('p', '', 'Con lo cargado, ninguna cuenta queda en rojo este mes. Alcanza.');
         ok.style.cssText = 'color:var(--ingreso);font-weight:600;margin:8px 0';
         caja.appendChild(ok);
       } else {
@@ -2908,7 +2908,7 @@
       }
 
       const det = el('details'); det.style.marginTop = '10px';
-      det.appendChild(el('summary', '', 'Ver cuenta por cuenta, mes a mes'));
+      det.appendChild(el('summary', '', 'Ver cuenta por cuenta'));
       const wrap = el('div', 'tabla-wrap'); const t = el('table', 'proy');
       const th = el('tr'); th.appendChild(el('th', '', 'Cuenta'));
       th.appendChild(el('th', '', 'Hoy')); th.appendChild(el('th', '', 'Mínimo')); th.appendChild(el('th', '', 'Final'));
@@ -4709,7 +4709,7 @@
   document.querySelectorAll('input[name=tipo]').forEach(function (r) { r.addEventListener('change', actualizarFormMov); });
   ['cuenta', 'cuenta-destino'].forEach(function (id) { $(id).addEventListener('change', actualizarFormMov); });
   ['monto', 'monto-dest'].forEach(function (id) { $(id).addEventListener('input', actualizarTC); });
-  const APP_VERSION = '13/10/2026 · contraparte en movimientos y dónde falta plata';
+  const APP_VERSION = '15/10/2026 · dónde falta plata solo este mes';
   $('version').textContent = 'Versión ' + APP_VERSION;
   const esLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || esLocal)) {
